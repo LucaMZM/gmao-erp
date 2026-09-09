@@ -53,6 +53,8 @@ async function initialize(): Promise<void> {
     )
     .run();
 
+  await adoptHostedSchema(db);
+
   for (const migration of MIGRATIONS) {
     const applied = await db
       .prepare("SELECT id FROM _mazmi_migrations WHERE id = ?")
@@ -78,6 +80,69 @@ async function initialize(): Promise<void> {
   await seedV1DDatabase(db);
   await seedV2ADatabase(db);
   await seedV2BDatabase(db);
+}
+
+async function adoptHostedSchema(db: ReturnType<typeof getD1>): Promise<void> {
+  const applied = await db
+    .prepare("SELECT COUNT(*) AS count FROM _mazmi_migrations")
+    .first<{ count: number }>();
+  if (Number(applied?.count ?? 0) > 0) return;
+
+  // Sites applies packaged D1 migrations before the Worker starts. Its migration
+  // ledger is separate from Mazmi's, so a freshly hosted database can contain the
+  // complete schema while `_mazmi_migrations` is still empty. Adopt only an exact
+  // final-schema fingerprint; a partial schema must continue to fail loudly.
+  const [domainTables, notificationScope, auditGuardrails] = await db.batch([
+    db.prepare(
+      `SELECT COUNT(*) AS count FROM sqlite_master
+       WHERE type = 'table' AND name IN (
+         'organizations',
+         'incidents',
+         'work_order_part_usages',
+         'maintenance_plans',
+         'root_cause_analyses',
+         'purchase_requisitions',
+         'shift_handovers',
+         'permission_definitions'
+       )`,
+    ),
+    db.prepare(
+      "SELECT COUNT(*) AS count FROM pragma_table_info('notifications') WHERE name = 'site_id'",
+    ),
+    db.prepare(
+      `SELECT COUNT(*) AS count FROM sqlite_master
+       WHERE (type = 'trigger' AND name IN (
+         'trg_audit_entries_append_only_update',
+         'trg_audit_entries_append_only_delete'
+       )) OR (type = 'index' AND name = 'production_calendars_site_default_unique')`,
+    ),
+  ]);
+
+  const hasCompleteHostedSchema =
+    Number(
+      (domainTables.results?.[0] as { count?: number } | undefined)?.count ?? 0,
+    ) === 8 &&
+    Number(
+      (notificationScope.results?.[0] as { count?: number } | undefined)
+        ?.count ?? 0,
+    ) === 1 &&
+    Number(
+      (auditGuardrails.results?.[0] as { count?: number } | undefined)?.count ??
+        0,
+    ) === 3;
+
+  if (!hasCompleteHostedSchema) return;
+
+  const appliedAt = new Date().toISOString();
+  await db.batch(
+    MIGRATIONS.map((migration) =>
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO _mazmi_migrations (id, applied_at) VALUES (?, ?)",
+        )
+        .bind(migration.id, appliedAt),
+    ),
+  );
 }
 
 export async function databaseHealth(): Promise<{
