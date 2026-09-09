@@ -1,0 +1,15 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_SITE_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - mazmi_d1_state:/app/.wrangler
+    restart: unless-stopped
+
+volumes:
+  mazmi_d1_state:

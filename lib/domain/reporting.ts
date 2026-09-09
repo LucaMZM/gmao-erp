@@ -1,0 +1,39 @@
+export type CostByAssetExportRow = {
+  code: string;
+  name: string;
+  laborCents: number;
+  materialCents: number;
+  explicitCents: number;
+  totalCents: number;
+  downtimeMinutes: number;
+};
+
+export function reportingCsv(data: {
+  costsByAsset: readonly CostByAssetExportRow[];
+}): string {
+  const escape = (value: unknown) =>
+    `"${String(value ?? "").replaceAll('"', '""')}"`;
+  const rows = [
+    [
+      "Activo",
+      "Nombre",
+      "Mano de obra EUR",
+      "MRO EUR",
+      "Otros EUR",
+      "Total EUR",
+      "Downtime min",
+    ],
+  ];
+  for (const item of data.costsByAsset) {
+    rows.push([
+      item.code,
+      item.name,
+      (item.laborCents / 100).toFixed(2),
+      (item.materialCents / 100).toFixed(2),
+      (item.explicitCents / 100).toFixed(2),
+      (item.totalCents / 100).toFixed(2),
+      String(item.downtimeMinutes),
+    ]);
+  }
+  return rows.map((row) => row.map(escape).join(",")).join("\n");
+}

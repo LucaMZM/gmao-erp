@@ -1,0 +1,62 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1787693231334,
+      "tag": "0000_ancient_greymalkin",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1787780618920,
+      "tag": "0001_purple_the_initiative",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788211791856,
+      "tag": "0002_zippy_lockheed",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1788213574950,
+      "tag": "0003_careful_forge",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1788282145631,
+      "tag": "0004_free_patch",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1788641512394,
+      "tag": "0005_magenta_vindicator",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1788725939738,
+      "tag": "0006_peaceful_reptil",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1788783827055,
+      "tag": "0007_luxuriant_ender_wiggin",
+      "breakpoints": true
+    }
+  ]
+}

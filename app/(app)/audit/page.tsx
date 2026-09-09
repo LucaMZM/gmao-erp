@@ -1,0 +1,145 @@
+import { Filter, ShieldCheck } from "lucide-react";
+import { redirect } from "next/navigation";
+import { PageHeader } from "@/components/ui/page-header";
+import { hasPermission } from "@/lib/domain/governance";
+import { formatDateTime } from "@/lib/presentation";
+import { requireDemoSession } from "@/lib/server/auth";
+import { getAuditEntries } from "@/lib/server/repositories/governance";
+
+function valuePreview(value: string | null) {
+  if (!value) return "—";
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+}
+
+export default async function AuditPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const session = await requireDemoSession();
+  if (!hasPermission(session.permissionCodes, "audit.read"))
+    redirect("/overview");
+  const query = await searchParams;
+  const one = (key: string) => {
+    const value = query[key];
+    return (Array.isArray(value) ? value[0] : value)?.slice(0, 80) ?? "";
+  };
+  const filters = {
+    actor: one("actor"),
+    action: one("action"),
+    entity: one("entity"),
+    outcome: one("outcome"),
+    from: one("from"),
+    to: one("to"),
+  };
+  const entries = await getAuditEntries(session, filters);
+  return (
+    <div className="page-stack governance-page">
+      <PageHeader
+        description="Investigación append-only de cambios sensibles, accesos y decisiones operativas."
+        eyebrow={`${session.siteCode} · Gobierno`}
+        title="Auditoría"
+      />
+      <form className="filter-bar audit-filter-bar">
+        <Filter size={15} />
+        <input
+          aria-label="Acción contiene"
+          defaultValue={filters.action}
+          name="action"
+          placeholder="Acción contiene…"
+        />
+        <select
+          aria-label="Tipo de entidad"
+          defaultValue={filters.entity}
+          name="entity"
+        >
+          <option value="">Todas las entidades</option>
+          <option value="SESSION">Sesión</option>
+          <option value="WORK_ORDER">Orden de trabajo</option>
+          <option value="PURCHASE_ORDER">Pedido</option>
+          <option value="ROOT_CAUSE_ANALYSIS">RCA</option>
+          <option value="MEMBERSHIP">Acceso</option>
+        </select>
+        <select
+          aria-label="Resultado"
+          defaultValue={filters.outcome}
+          name="outcome"
+        >
+          <option value="">Todos los resultados</option>
+          <option value="SUCCESS">Correcto</option>
+          <option value="DENIED">Denegado</option>
+          <option value="FAILURE">Fallido</option>
+        </select>
+        <input
+          aria-label="Desde"
+          defaultValue={filters.from}
+          name="from"
+          type="date"
+        />
+        <input
+          aria-label="Hasta"
+          defaultValue={filters.to}
+          name="to"
+          type="date"
+        />
+        <button className="secondary-button" type="submit">
+          Aplicar
+        </button>
+      </form>
+      <section
+        className="data-panel audit-stream"
+        aria-label="Registro de auditoría"
+      >
+        <div className="panel-title-row">
+          <div>
+            <p className="overline">Trazabilidad inmutable</p>
+            <h2>{entries.length} eventos en el alcance</h2>
+          </div>
+          <span className="governance-seal">
+            <ShieldCheck size={15} /> Solo lectura
+          </span>
+        </div>
+        <div className="audit-list">
+          {entries.map((entry) => (
+            <details className="audit-entry" key={entry.id}>
+              <summary>
+                <span
+                  className={`audit-outcome ${entry.outcome.toLowerCase()}`}
+                />
+                <span>
+                  <strong>{entry.action.replaceAll("_", " ")}</strong>
+                  <small>
+                    {entry.actorName} · {entry.entityType} · {entry.entityId}
+                  </small>
+                </span>
+                <time>{formatDateTime(entry.createdAt)}</time>
+              </summary>
+              <div className="audit-change-grid">
+                <div>
+                  <span>Anterior</span>
+                  <pre>{valuePreview(entry.previousValue)}</pre>
+                </div>
+                <div>
+                  <span>Nuevo</span>
+                  <pre>{valuePreview(entry.newValue)}</pre>
+                </div>
+                <div>
+                  <span>Contexto</span>
+                  <pre>{valuePreview(entry.contextJson)}</pre>
+                </div>
+              </div>
+              <p className="audit-request">
+                Request {entry.requestId ?? "sin correlación"}
+                {entry.errorCode ? ` · ${entry.errorCode}` : ""}
+              </p>
+            </details>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
