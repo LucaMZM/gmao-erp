@@ -4,7 +4,7 @@ import {
   type CriticalSpareRisk,
 } from "@/lib/domain/procurement";
 import type { TenantScope } from "./shared";
-import { queryAll, queryFirst } from "./shared";
+import { queryAll, queryFirst, warehouseScopePredicate } from "./shared";
 
 export type ProcurementRequisitionRow = {
   id: string;
@@ -124,6 +124,46 @@ export async function getProcurementCenter(
 ): Promise<ProcurementCenterData> {
   const now = new Date().toISOString();
   const ninetyDaysAgo = new Date(Date.now() - 90 * 86_400_000).toISOString();
+  const warehouseScope = warehouseScopePredicate(scope, "warehouse.id");
+  const stockWarehouseScope = warehouseScopePredicate(
+    scope,
+    "stock_bin.warehouse_id",
+  );
+  const requisitionSummaryScope = warehouseScopePredicate(
+    scope,
+    "requisition.warehouse_id",
+  );
+  const orderSummaryScope = warehouseScopePredicate(
+    scope,
+    "purchase_order.warehouse_id",
+  );
+  const waitingSummaryScope = warehouseScopePredicate(
+    scope,
+    "material_bin.warehouse_id",
+  );
+  const demandWarehouseScope = warehouseScopePredicate(
+    scope,
+    "demand_bin.warehouse_id",
+  );
+  const waitingWarehouseScope = warehouseScopePredicate(
+    scope,
+    "waiting_bin.warehouse_id",
+  );
+  const vendorOrderScope = warehouseScopePredicate(scope, "po.warehouse_id");
+  const receiptSummaryScope = warehouseScopePredicate(
+    scope,
+    "receipt.warehouse_id",
+  );
+  const transferScope =
+    scope.fullWarehouseAccess === false
+      ? scope.warehouseIds?.length
+        ? {
+            sql: `(source.id IN (${scope.warehouseIds.map(() => "?").join(",")})
+              OR target.id IN (${scope.warehouseIds.map(() => "?").join(",")}))`,
+            params: [...scope.warehouseIds, ...scope.warehouseIds],
+          }
+        : { sql: "1 = 0", params: [] }
+      : { sql: "1 = 1", params: [] };
   const [
     summary,
     requisitions,
@@ -137,36 +177,56 @@ export async function getProcurementCenter(
   ] = await Promise.all([
     queryFirst<ProcurementCenterData["summary"]>(
       `SELECT
-          (SELECT COUNT(*) FROM purchase_requisitions WHERE site_id = ?
-            AND status IN ('DRAFT','SUBMITTED','APPROVED')) AS pendingRequisitions,
-          (SELECT COUNT(*) FROM purchase_requisitions WHERE site_id = ?
-            AND status = 'SUBMITTED') AS pendingApproval,
-          (SELECT COUNT(*) FROM purchase_orders WHERE site_id = ?
-            AND status IN ('DRAFT','APPROVED','SENT','PARTIALLY_RECEIVED')) AS openOrders,
-          (SELECT COUNT(*) FROM purchase_orders WHERE site_id = ?
-            AND status IN ('SENT','PARTIALLY_RECEIVED') AND expected_at < ?) AS delayedOrders,
-          (SELECT COUNT(*) FROM purchase_orders WHERE site_id = ?
-            AND status = 'PARTIALLY_RECEIVED') AS partialReceipts,
+          (SELECT COUNT(*) FROM purchase_requisitions requisition WHERE requisition.site_id = ?
+            AND requisition.status IN ('DRAFT','SUBMITTED','APPROVED')
+            AND ${requisitionSummaryScope.sql}) AS pendingRequisitions,
+          (SELECT COUNT(*) FROM purchase_requisitions requisition WHERE requisition.site_id = ?
+            AND requisition.status = 'SUBMITTED'
+            AND ${requisitionSummaryScope.sql}) AS pendingApproval,
+          (SELECT COUNT(*) FROM purchase_orders purchase_order WHERE purchase_order.site_id = ?
+            AND purchase_order.status IN ('DRAFT','APPROVED','SENT','PARTIALLY_RECEIVED')
+            AND ${orderSummaryScope.sql}) AS openOrders,
+          (SELECT COUNT(*) FROM purchase_orders purchase_order WHERE purchase_order.site_id = ?
+            AND purchase_order.status IN ('SENT','PARTIALLY_RECEIVED')
+            AND purchase_order.expected_at < ? AND ${orderSummaryScope.sql}) AS delayedOrders,
+          (SELECT COUNT(*) FROM purchase_orders purchase_order WHERE purchase_order.site_id = ?
+            AND purchase_order.status = 'PARTIALLY_RECEIVED'
+            AND ${orderSummaryScope.sql}) AS partialReceipts,
           (SELECT COUNT(*) FROM part_site_policies policy
             WHERE policy.site_id = ? AND policy.critical = 1
               AND COALESCE((SELECT SUM(stock.on_hand - stock.reserved)
-                FROM stock_levels stock WHERE stock.part_id = policy.part_id
-                  AND stock.site_id = policy.site_id), 0) <= 0) AS criticalStockouts,
-          (SELECT COUNT(*) FROM work_orders WHERE site_id = ?
-            AND status = 'WAITING_PART') AS waitingWorkOrders,
-          (SELECT COALESCE(SUM(total_cost), 0) FROM goods_receipts
-            WHERE site_id = ? AND received_at >= ?) AS recentSpend`,
+                FROM stock_levels stock
+                INNER JOIN warehouse_bins stock_bin ON stock_bin.id = stock.bin_id
+                WHERE stock.part_id = policy.part_id
+                  AND stock.site_id = policy.site_id
+                  AND ${stockWarehouseScope.sql}), 0) <= 0) AS criticalStockouts,
+          (SELECT COUNT(DISTINCT work_order.id) FROM work_orders work_order
+            INNER JOIN work_order_materials material ON material.work_order_id = work_order.id
+            INNER JOIN warehouse_bins material_bin ON material_bin.id = material.bin_id
+            WHERE work_order.site_id = ? AND work_order.status = 'WAITING_PART'
+              AND ${waitingSummaryScope.sql}) AS waitingWorkOrders,
+          (SELECT COALESCE(SUM(receipt.total_cost), 0) FROM goods_receipts receipt
+            WHERE receipt.site_id = ? AND receipt.received_at >= ?
+              AND ${receiptSummaryScope.sql}) AS recentSpend`,
       [
         scope.siteId,
+        ...requisitionSummaryScope.params,
         scope.siteId,
+        ...requisitionSummaryScope.params,
         scope.siteId,
+        ...orderSummaryScope.params,
         scope.siteId,
         now,
+        ...orderSummaryScope.params,
         scope.siteId,
+        ...orderSummaryScope.params,
         scope.siteId,
+        ...stockWarehouseScope.params,
         scope.siteId,
+        ...waitingSummaryScope.params,
         scope.siteId,
         ninetyDaysAgo,
+        ...receiptSummaryScope.params,
       ],
     ),
     queryAll<ProcurementRequisitionRow>(
@@ -185,12 +245,13 @@ export async function getProcurementCenter(
          INNER JOIN parts part ON part.id = line.part_id
          LEFT JOIN work_orders wo ON wo.id = requisition.work_order_id
          WHERE requisition.organization_id = ? AND requisition.site_id = ?
+           AND ${warehouseScope.sql}
          GROUP BY requisition.id
          ORDER BY CASE requisition.status WHEN 'SUBMITTED' THEN 0 WHEN 'APPROVED' THEN 1
            WHEN 'DRAFT' THEN 2 ELSE 3 END,
            CASE requisition.urgency WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END,
            requisition.created_at DESC LIMIT 30`,
-      [scope.organizationId, scope.siteId],
+      [scope.organizationId, scope.siteId, ...warehouseScope.params],
     ),
     queryAll<ProcurementOrderRow>(
       `SELECT po.id, po.number, po.status, po.expected_at AS expectedAt,
@@ -205,11 +266,12 @@ export async function getProcurementCenter(
          INNER JOIN purchase_requisitions requisition ON requisition.id = po.requisition_id
          INNER JOIN purchase_order_lines line ON line.purchase_order_id = po.id
          WHERE po.organization_id = ? AND po.site_id = ?
+           AND ${warehouseScope.sql}
          GROUP BY po.id
          ORDER BY CASE po.status WHEN 'PARTIALLY_RECEIVED' THEN 0 WHEN 'SENT' THEN 1
            WHEN 'APPROVED' THEN 2 WHEN 'DRAFT' THEN 3 ELSE 4 END,
            po.expected_at, po.created_at DESC LIMIT 30`,
-      [scope.organizationId, scope.siteId],
+      [scope.organizationId, scope.siteId, ...warehouseScope.params],
     ),
     queryAll<Omit<ProcurementRiskRow, "risk" | "replenishment">>(
       `SELECT part.id AS partId, part.sku, part.name, part.unit,
@@ -223,20 +285,34 @@ export async function getProcurementCenter(
           COALESCE((SELECT SUM(MAX(material.planned_quantity - material.reserved_quantity - material.consumed_quantity, 0))
             FROM work_order_materials material
             INNER JOIN work_orders wo ON wo.id = material.work_order_id
+            INNER JOIN warehouse_bins demand_bin ON demand_bin.id = material.bin_id
             WHERE material.part_id = part.id AND wo.site_id = policy.site_id
+              AND ${demandWarehouseScope.sql}
               AND wo.status IN ('REQUESTED','TRIAGE','APPROVED','PLANNED','SCHEDULED','ASSIGNED','IN_PROGRESS','PAUSED','WAITING_PART','WAITING_VENDOR')), 0) AS openDemand,
           (SELECT COUNT(DISTINCT wo.id) FROM work_order_materials material
             INNER JOIN work_orders wo ON wo.id = material.work_order_id
+            INNER JOIN warehouse_bins waiting_bin ON waiting_bin.id = material.bin_id
             WHERE material.part_id = part.id AND wo.site_id = policy.site_id
+              AND ${waitingWarehouseScope.sql}
               AND wo.status = 'WAITING_PART') AS waitingWorkOrders
          FROM parts part
          INNER JOIN part_site_policies policy ON policy.part_id = part.id AND policy.site_id = ?
-         LEFT JOIN stock_levels stock ON stock.part_id = part.id AND stock.site_id = policy.site_id
+         LEFT JOIN stock_levels stock ON stock.part_id = part.id
+           AND stock.site_id = policy.site_id AND EXISTS (
+             SELECT 1 FROM warehouse_bins stock_bin WHERE stock_bin.id = stock.bin_id
+               AND ${stockWarehouseScope.sql}
+           )
          WHERE part.organization_id = ? AND part.status = 'ACTIVE'
          GROUP BY part.id, policy.id
          HAVING available <= policy.reorder_point OR waitingWorkOrders > 0
          ORDER BY policy.critical DESC, available ASC, policy.lead_time_days DESC LIMIT 40`,
-      [scope.siteId, scope.organizationId],
+      [
+        scope.siteId,
+        ...stockWarehouseScope.params,
+        ...demandWarehouseScope.params,
+        ...waitingWarehouseScope.params,
+        scope.organizationId,
+      ],
     ),
     queryAll<ProcurementTransferRow>(
       `SELECT transfer.id, transfer.number, transfer.status, transfer.version,
@@ -250,8 +326,9 @@ export async function getProcurementCenter(
          INNER JOIN stock_transfer_lines line ON line.stock_transfer_id = transfer.id
          INNER JOIN parts part ON part.id = line.part_id
          WHERE transfer.organization_id = ? AND transfer.site_id = ?
+           AND ${transferScope.sql}
          GROUP BY transfer.id ORDER BY transfer.created_at DESC LIMIT 15`,
-      [scope.organizationId, scope.siteId],
+      [scope.organizationId, scope.siteId, ...transferScope.params],
     ),
     queryAll<{
       id: string;
@@ -269,10 +346,14 @@ export async function getProcurementCenter(
           policy.max_stock AS maxStock, policy.reorder_point AS reorderPoint
          FROM parts part
          INNER JOIN part_site_policies policy ON policy.part_id = part.id AND policy.site_id = ?
-         LEFT JOIN stock_levels stock ON stock.part_id = part.id AND stock.site_id = policy.site_id
+         LEFT JOIN stock_levels stock ON stock.part_id = part.id
+           AND stock.site_id = policy.site_id AND EXISTS (
+             SELECT 1 FROM warehouse_bins stock_bin WHERE stock_bin.id = stock.bin_id
+               AND ${stockWarehouseScope.sql}
+           )
          WHERE part.organization_id = ? AND part.status = 'ACTIVE'
          GROUP BY part.id, policy.id ORDER BY part.sku LIMIT 240`,
-      [scope.siteId, scope.organizationId],
+      [scope.siteId, ...stockWarehouseScope.params, scope.organizationId],
     ),
     queryAll<ProcurementCenterData["vendors"][number]>(
       `SELECT vendor.id, vendor.code, vendor.name,
@@ -285,15 +366,17 @@ export async function getProcurementCenter(
          LEFT JOIN part_vendor_offers offer
            ON offer.vendor_id = vendor.id AND offer.status = 'ACTIVE'
          LEFT JOIN purchase_orders po ON po.vendor_id = vendor.id
+           AND po.site_id = ? AND ${vendorOrderScope.sql}
          WHERE vendor.organization_id = ? AND vendor.status = 'ACTIVE'
          GROUP BY vendor.id ORDER BY suppliedParts DESC, vendor.name`,
-      [scope.organizationId],
+      [scope.siteId, ...vendorOrderScope.params, scope.organizationId],
     ),
     queryAll<ProcurementCenterData["warehouses"][number]>(
       `SELECT id, code, name FROM warehouses
          WHERE organization_id = ? AND site_id = ? AND status = 'ACTIVE'
+           AND ${warehouseScope.sql}
          ORDER BY code`,
-      [scope.organizationId, scope.siteId],
+      [scope.organizationId, scope.siteId, ...warehouseScope.params],
     ),
     queryAll<ProcurementCenterData["bins"][number]>(
       `SELECT bin.id, bin.warehouse_id AS warehouseId,
@@ -303,8 +386,9 @@ export async function getProcurementCenter(
          LEFT JOIN warehouse_zones zone ON zone.id = bin.zone_id
          WHERE warehouse.organization_id = ? AND warehouse.site_id = ?
            AND warehouse.status = 'ACTIVE' AND bin.status = 'ACTIVE'
+           AND ${warehouseScope.sql}
          ORDER BY warehouse.code, zone.code, bin.code`,
-      [scope.organizationId, scope.siteId],
+      [scope.organizationId, scope.siteId, ...warehouseScope.params],
     ),
   ]);
 
@@ -368,6 +452,7 @@ export async function getProcurementCenter(
 }
 
 export type RequisitionDetailData = ProcurementRequisitionRow & {
+  warehouseId: string;
   approvedAt: string | null;
   approverName: string | null;
   decisionReason: string | null;
@@ -415,8 +500,10 @@ export async function getRequisitionDetail(
   scope: TenantScope,
   number: string,
 ): Promise<RequisitionDetailData | null> {
+  const warehouseScope = warehouseScopePredicate(scope, "warehouse.id");
   const requisition = await queryFirst<
     ProcurementRequisitionRow & {
+      warehouseId: string;
       approvedAt: string | null;
       approverName: string | null;
       decisionReason: string | null;
@@ -427,7 +514,8 @@ export async function getRequisitionDetail(
       requisition.origin, requisition.urgency, requisition.need_by AS needBy,
       requisition.justification, requisition.created_at AS createdAt,
       requisition.version, requester.full_name AS requesterName,
-      warehouse.name AS warehouseName, wo.number AS workOrderNumber,
+      warehouse.id AS warehouseId, warehouse.name AS warehouseName,
+      wo.number AS workOrderNumber,
       1 AS lineCount,
       (SELECT GROUP_CONCAT(part.sku || ' × ' || line.quantity, ', ')
        FROM purchase_requisition_lines line INNER JOIN parts part ON part.id = line.part_id
@@ -442,8 +530,8 @@ export async function getRequisitionDetail(
      LEFT JOIN work_orders wo ON wo.id = requisition.work_order_id
      LEFT JOIN purchase_orders po ON po.requisition_id = requisition.id
      WHERE requisition.organization_id = ? AND requisition.site_id = ?
-       AND requisition.number = ? LIMIT 1`,
-    [scope.organizationId, scope.siteId, number],
+       AND requisition.number = ? AND ${warehouseScope.sql} LIMIT 1`,
+    [scope.organizationId, scope.siteId, number, ...warehouseScope.params],
   );
   if (!requisition) return null;
   const [lines, offers, events] = await Promise.all([
@@ -452,13 +540,23 @@ export async function getRequisitionDetail(
         line.quantity, line.available_snapshot AS availableSnapshot,
         line.on_order_snapshot AS onOrderSnapshot,
         COALESCE((SELECT SUM(stock.on_hand - stock.reserved) FROM stock_levels stock
-          WHERE stock.part_id = part.id AND stock.site_id = ?), 0) AS currentAvailable,
+          INNER JOIN warehouse_bins stock_bin ON stock_bin.id = stock.bin_id
+          WHERE stock.part_id = part.id AND stock.site_id = ?
+            AND stock_bin.warehouse_id = ?), 0) AS currentAvailable,
         COALESCE((SELECT SUM(stock.on_order) FROM stock_levels stock
-          WHERE stock.part_id = part.id AND stock.site_id = ?), 0) AS currentOnOrder
+          INNER JOIN warehouse_bins stock_bin ON stock_bin.id = stock.bin_id
+          WHERE stock.part_id = part.id AND stock.site_id = ?
+            AND stock_bin.warehouse_id = ?), 0) AS currentOnOrder
        FROM purchase_requisition_lines line
        INNER JOIN parts part ON part.id = line.part_id
        WHERE line.purchase_requisition_id = ? ORDER BY part.sku`,
-      [scope.siteId, scope.siteId, requisition.id],
+      [
+        scope.siteId,
+        requisition.warehouseId,
+        scope.siteId,
+        requisition.warehouseId,
+        requisition.id,
+      ],
     ),
     queryAll<RequisitionDetailData["offers"][number]>(
       `SELECT offer.id, offer.part_id AS partId, offer.vendor_id AS vendorId,
@@ -520,6 +618,7 @@ export async function getPurchaseOrderDetail(
   scope: TenantScope,
   number: string,
 ): Promise<PurchaseOrderDetailData | null> {
+  const warehouseScope = warehouseScopePredicate(scope, "warehouse.id");
   const order = await queryFirst<
     Omit<PurchaseOrderDetailData, "lines" | "receipts" | "events">
   >(
@@ -542,8 +641,9 @@ export async function getPurchaseOrderDetail(
      INNER JOIN warehouse_bins bin ON bin.id = po.destination_bin_id
      INNER JOIN purchase_requisitions requisition ON requisition.id = po.requisition_id
      LEFT JOIN work_orders wo ON wo.id = requisition.work_order_id
-     WHERE po.organization_id = ? AND po.site_id = ? AND po.number = ? LIMIT 1`,
-    [scope.organizationId, scope.siteId, number],
+     WHERE po.organization_id = ? AND po.site_id = ? AND po.number = ?
+       AND ${warehouseScope.sql} LIMIT 1`,
+    [scope.organizationId, scope.siteId, number, ...warehouseScope.params],
   );
   if (!order) return null;
   const [lines, receipts, events] = await Promise.all([

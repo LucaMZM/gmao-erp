@@ -12,7 +12,9 @@ export default defineConfig({
   expect: {
     toHaveScreenshot: {
       animations: "disabled",
-      caret: "hide",
+      // Hiding the caret mutates form-control styles before Vinext finishes
+      // hydrating streamed routes, producing false React mismatch errors.
+      caret: "initial",
       maxDiffPixelRatio: 0.012,
     },
   },
@@ -26,7 +28,8 @@ export default defineConfig({
   webServer: process.env.MAZMI_VISUAL_BASE_URL
     ? undefined
     : {
-        command: "npm run dev -- --port 3020",
+        command:
+          "MAZMI_EPHEMERAL_STATE=1 npm run dev -- --hostname 127.0.0.1 --port 3020",
         url: baseURL,
         reuseExistingServer: true,
         timeout: 120_000,

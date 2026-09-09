@@ -36,6 +36,25 @@ async function expectRejectedOrigin(response) {
   assert(payload.error?.requestId, "Origin rejection omitted requestId.");
 }
 
+async function expectPageRedirect(path, cookie, destination = "/overview") {
+  const response = await fetch(`${baseUrl}${path}`, {
+    headers: { cookie },
+    redirect: "manual",
+  });
+  assert(
+    [301, 302, 303, 307, 308].includes(response.status),
+    `${path} should redirect, got ${response.status}.`,
+  );
+  const location = new URL(
+    response.headers.get("location") ?? "/missing",
+    baseUrl,
+  );
+  assert(
+    location.pathname === destination,
+    `${path} redirected to ${location.pathname}, expected ${destination}.`,
+  );
+}
+
 async function postJson(path, cookie, body) {
   return fetch(`${baseUrl}${path}`, {
     method: "POST",
@@ -251,20 +270,40 @@ assert(
   "Levante asset was not searchable.",
 );
 
+const incidentIdempotencyKey = `smoke-incident-${crypto.randomUUID()}`;
+const incidentPayload = {
+  functionalLocationId: "loc-lev-lm-01",
+  assetId: "asset-lm-01-drv",
+  title: "Validación integral del acoplamiento de LM-01",
+  description:
+    "Se detecta vibración reproducible durante el cambio de velocidad del equipo.",
+  severity: "HIGH",
+  initialImpact: "REDUCED_SPEED",
+  origin: "MAINTENANCE",
+};
 const incident = await expectOkData(
-  await postJson("/api/incidents", cookie, {
-    functionalLocationId: "loc-lev-lm-01",
-    assetId: "asset-lm-01-drv",
-    title: "Validación integral del acoplamiento de LM-01",
-    description:
-      "Se detecta vibración reproducible durante el cambio de velocidad del equipo.",
-    severity: "HIGH",
-    initialImpact: "REDUCED_SPEED",
-    origin: "MAINTENANCE",
-  }),
+  await postJsonIdempotent(
+    "/api/incidents",
+    cookie,
+    incidentPayload,
+    incidentIdempotencyKey,
+  ),
   "Incident report",
 );
 assert(incident.id && incident.number, "Incident creation omitted identity.");
+const replayedIncident = await expectOkData(
+  await postJsonIdempotent(
+    "/api/incidents",
+    cookie,
+    incidentPayload,
+    incidentIdempotencyKey,
+  ),
+  "Incident idempotency replay",
+);
+assert(
+  replayedIncident.id === incident.id,
+  "Incident idempotency did not return the original resource.",
+);
 
 await expectOkData(
   await postJson(`/api/incidents/${incident.id}/triage`, cookie, {
@@ -1079,6 +1118,40 @@ await expectOkData(
   "Receive internal transfer",
 );
 
+const lineWarehouseRequisition = await expectOkData(
+  await postJson("/api/procurement/requisitions", cookie, {
+    partId: "part-001",
+    quantity: 1,
+    warehouseId: "warehouse-lev-line",
+    origin: "MANUAL",
+    urgency: "ROUTINE",
+    justification:
+      "Caso centinela para validar el scope de lectura de almacén.",
+    submit: true,
+  }),
+  "Create out-of-scope warehouse requisition sentinel",
+);
+const lineWarehouseRequisitionPath = `/api/procurement/requisitions/${encodeURIComponent(lineWarehouseRequisition.number)}`;
+await expectOkData(
+  await postJson(`${lineWarehouseRequisitionPath}/actions`, cookie, {
+    action: "APPROVE",
+    version: 1,
+  }),
+  "Approve out-of-scope warehouse requisition sentinel",
+);
+const lineWarehouseOrder = await expectOkData(
+  await postJson(`${lineWarehouseRequisitionPath}/convert`, cookie, {
+    vendorId: "vendor-motionex",
+    offerId: "offer-primary-part-001",
+    warehouseId: "warehouse-lev-line",
+    destinationBinId: "bin-lev-line-1",
+    expectedAt: new Date(Date.now() + 5 * 86_400_000).toISOString(),
+    taxRate: 21,
+    version: 2,
+  }),
+  "Convert out-of-scope warehouse requisition sentinel",
+);
+
 for (const [route, expected] of [
   ["/procurement", "Supply operativo"],
   [
@@ -1257,6 +1330,18 @@ await expectApiError(
   409,
   "EVIDENCE_TYPE_NOT_ALLOWED",
 );
+await expectApiError(
+  await postJson(evidencePath, technicianCookie, {
+    kind: "PHOTO",
+    stage: "BEFORE",
+    description: "Contenido HTML declarado falsamente como imagen.",
+    fileName: "evidencia.png",
+    contentType: "image/png",
+    dataBase64: "PGh0bWw+PC9odG1sPg==",
+  }),
+  409,
+  "EVIDENCE_CONTENT_MISMATCH",
+);
 const idempotencyKey = `field_note_${crypto.randomUUID()}`;
 const idempotentEvidenceBody = {
   kind: "NOTE",
@@ -1326,6 +1411,17 @@ const photoContent = await fetch(
   { headers: { cookie: technicianCookie } },
 );
 assert(photoContent.ok, "Stored field evidence could not be retrieved.");
+assert(
+  photoContent.headers.get("x-content-type-options") === "nosniff",
+  "Evidence content omitted MIME-sniffing protection.",
+);
+const unauthenticatedEvidence = await fetch(
+  `${baseUrl}/api/field/evidence/${photoEvidence.id}/content`,
+);
+assert(
+  unauthenticatedEvidence.status === 401,
+  `Unauthenticated evidence returned ${unauthenticatedEvidence.status}.`,
+);
 
 await expectOkData(
   await postJson(`${fieldWorkPath}/materials`, technicianCookie, {
@@ -1474,6 +1570,25 @@ const switchToAlzira = await fetch(`${baseUrl}/api/session/site`, {
 });
 assert(switchToAlzira.ok, `Alzira switch failed with ${switchToAlzira.status}`);
 
+await expectApiError(
+  await postJsonIdempotent(
+    "/api/incidents",
+    cookie,
+    {
+      functionalLocationId: "loc-alz-lm-01",
+      title: "Ensayo de aislamiento de idempotencia",
+      description:
+        "La respuesta de Levante no debe cruzar al centro de Alzira.",
+      severity: "LOW",
+      initialImpact: "NO_IMPACT",
+      origin: "MAINTENANCE",
+    },
+    incidentIdempotencyKey,
+  ),
+  409,
+  "IDEMPOTENCY_KEY_REUSED",
+);
+
 const alziraOverview = await fetch(`${baseUrl}/overview`, {
   headers: { cookie },
 });
@@ -1604,6 +1719,28 @@ const operatorLogin = await fetch(`${baseUrl}/api/auth/login`, {
 assert(operatorLogin.ok, "Area-scoped operator login failed.");
 const operatorCookie = operatorLogin.headers.get("set-cookie")?.split(";")[0];
 assert(operatorCookie, "Area-scoped operator login omitted cookie.");
+for (const restrictedPage of [
+  "/maintenance-plans",
+  "/maintenance-plans/PM-LEV-2026-003",
+  "/planner",
+  "/reliability",
+  "/reliability/rca/RCA-LEV-2026-001",
+  "/procurement",
+  "/procurement/requisitions/PR-LEV-2026-048",
+  "/procurement/purchase-orders/PO-LEV-2026-069",
+  "/audit",
+  "/governance",
+]) {
+  await expectPageRedirect(restrictedPage, operatorCookie);
+}
+const outOfAreaEvidence = await fetch(
+  `${baseUrl}/api/field/evidence/${photoEvidence.id}/content`,
+  { headers: { cookie: operatorCookie } },
+);
+assert(
+  outOfAreaEvidence.status === 404,
+  `Area-scoped user accessed evidence outside its area (${outOfAreaEvidence.status}).`,
+);
 await expectApiError(
   await postJson("/api/incidents", operatorCookie, {
     functionalLocationId: "loc-lev-lm-02",
@@ -1630,6 +1767,43 @@ const warehouseLogin = await fetch(`${baseUrl}/api/auth/login`, {
 assert(warehouseLogin.ok, "Warehouse-scoped user login failed.");
 const warehouseCookie = warehouseLogin.headers.get("set-cookie")?.split(";")[0];
 assert(warehouseCookie, "Warehouse-scoped user login omitted cookie.");
+const warehouseInventory = await fetch(`${baseUrl}/inventory?part=part-001`, {
+  headers: { cookie: warehouseCookie },
+});
+assert(warehouseInventory.ok, "Warehouse-scoped inventory failed.");
+const warehouseInventoryBody = await warehouseInventory.text();
+assert(
+  warehouseInventoryBody.includes("Almacén MRO Levante"),
+  "Allowed MRO warehouse was omitted from scoped inventory.",
+);
+assert(
+  !warehouseInventoryBody.includes("Puntos MRO de línea"),
+  "Inventory leaked a warehouse outside the user's scope.",
+);
+const warehouseProcurement = await fetch(`${baseUrl}/procurement`, {
+  headers: { cookie: warehouseCookie },
+});
+assert(
+  warehouseProcurement.ok,
+  "Warehouse receiver could not access scoped procurement.",
+);
+for (const outOfWarehouseRoute of [
+  `/procurement/requisitions/${encodeURIComponent(lineWarehouseRequisition.number)}`,
+  `/procurement/purchase-orders/${encodeURIComponent(lineWarehouseOrder.number)}`,
+]) {
+  const response = await fetch(`${baseUrl}${outOfWarehouseRoute}`, {
+    headers: { cookie: warehouseCookie },
+  });
+  const body = await response.text();
+  assert(
+    response.status === 404 || body.includes("Fuera de contexto"),
+    `${outOfWarehouseRoute} did not render a scoped not-found response (${response.status}).`,
+  );
+  assert(
+    !body.includes("Caso centinela para validar el scope de lectura"),
+    `${outOfWarehouseRoute} exposed data outside warehouse scope.`,
+  );
+}
 await expectApiError(
   await postJson("/api/procurement/requisitions", warehouseCookie, {
     partId: "part-017",

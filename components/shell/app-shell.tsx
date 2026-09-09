@@ -42,6 +42,7 @@ const navigation: Array<{
   short: string;
   icon: typeof Gauge;
   permission?: EnterprisePermission;
+  alternatePermission?: EnterprisePermission;
 }> = [
   {
     href: "/overview",
@@ -103,6 +104,7 @@ const navigation: Array<{
     short: "Supply",
     icon: Truck,
     permission: "procurement.approve",
+    alternatePermission: "procurement.receive",
   },
   {
     href: "/reports",
@@ -156,7 +158,9 @@ export function AppShell({
   const visibleNavigation = navigation.filter(
     (item) =>
       !item.permission ||
-      hasPermission(session.permissionCodes, item.permission),
+      hasPermission(session.permissionCodes, item.permission) ||
+      (item.alternatePermission &&
+        hasPermission(session.permissionCodes, item.alternatePermission)),
   );
   const mobileNavigation =
     session.roleKey === "TECHNICIAN"

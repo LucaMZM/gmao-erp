@@ -27,6 +27,7 @@ import {
   type InventoryFilters,
   listInventory,
 } from "@/lib/server/repositories/inventory";
+import { tenantScope } from "@/lib/server/repositories/shared";
 
 function stockTone(item: {
   available: number;
@@ -50,13 +51,7 @@ export default async function InventoryPage({
 }) {
   const filters = await searchParams;
   const session = await requireDemoSession();
-  const data = await listInventory(
-    {
-      organizationId: session.organizationId,
-      siteId: session.siteId,
-    },
-    filters,
-  );
+  const data = await listInventory(tenantScope(session), filters);
   const selectedStatus = data.selected ? stockTone(data.selected.part) : null;
 
   return (

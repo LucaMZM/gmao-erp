@@ -32,3 +32,34 @@ export function assertEvidencePolicy(contentType: string, sizeBytes: number) {
     );
   }
 }
+
+export function assertEvidenceContent(
+  contentType: string,
+  data: ArrayBuffer,
+): void {
+  const bytes = new Uint8Array(data);
+  const matches =
+    (contentType === "image/png" &&
+      bytes.length >= 8 &&
+      [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every(
+        (byte, index) => bytes[index] === byte,
+      )) ||
+    (contentType === "image/jpeg" &&
+      bytes.length >= 3 &&
+      bytes[0] === 0xff &&
+      bytes[1] === 0xd8 &&
+      bytes[2] === 0xff) ||
+    (contentType === "image/webp" &&
+      bytes.length >= 12 &&
+      String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" &&
+      String.fromCharCode(...bytes.slice(8, 12)) === "WEBP") ||
+    (contentType === "application/pdf" &&
+      bytes.length >= 5 &&
+      String.fromCharCode(...bytes.slice(0, 5)) === "%PDF-");
+  if (!matches) {
+    throw new DomainInvariantError(
+      "EVIDENCE_CONTENT_MISMATCH",
+      "El contenido del archivo no coincide con su tipo declarado.",
+    );
+  }
+}

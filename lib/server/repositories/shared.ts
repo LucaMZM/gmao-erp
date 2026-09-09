@@ -10,6 +10,8 @@ export type TenantScope = {
   roleKey?: string;
   fullAreaAccess?: boolean;
   areaIds?: string[];
+  fullWarehouseAccess?: boolean;
+  warehouseIds?: string[];
 };
 
 export function tenantScope(session: DemoUserSession): TenantScope {
@@ -20,6 +22,21 @@ export function tenantScope(session: DemoUserSession): TenantScope {
     roleKey: session.roleKey,
     fullAreaAccess: session.fullAreaAccess,
     areaIds: session.areaIds,
+    fullWarehouseAccess: session.fullWarehouseAccess,
+    warehouseIds: session.warehouseIds,
+  };
+}
+
+export function warehouseScopePredicate(
+  scope: TenantScope,
+  warehouseExpression: string,
+): { sql: string; params: SqlValue[] } {
+  if (scope.fullWarehouseAccess !== false) return { sql: "1 = 1", params: [] };
+  const ids = scope.warehouseIds ?? [];
+  if (!ids.length) return { sql: "1 = 0", params: [] };
+  return {
+    sql: `${warehouseExpression} IN (${ids.map(() => "?").join(",")})`,
+    params: ids,
   };
 }
 

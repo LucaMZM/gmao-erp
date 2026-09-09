@@ -12,11 +12,13 @@ import {
   Wrench,
 } from "lucide-react";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { RcaCreateDialog } from "@/components/reliability/rca-create-dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { can } from "@/lib/domain/permissions";
+import { hasPermission } from "@/lib/domain/governance";
 import {
   formatCurrency,
   formatDate,
@@ -85,6 +87,8 @@ export default async function ReliabilityPage({
       ? params.pareto
       : "asset";
   const session = await requireDemoSession();
+  if (!hasPermission(session.permissionCodes, "reliability.rca.manage"))
+    redirect("/overview");
   const data = await getReliabilityCenter({
     organizationId: session.organizationId,
     siteId: session.siteId,

@@ -7,6 +7,7 @@ import { createEvidenceMetadata } from "@/lib/server/operations/field";
 import { operationId } from "@/lib/server/operations/shared";
 import { runIdempotent } from "@/lib/server/operations/shared";
 import {
+  assertEvidenceContent,
   assertEvidencePolicy,
   sanitizeEvidenceFileName,
 } from "@/lib/domain/evidence-policy";
@@ -79,6 +80,7 @@ export async function POST(
         if (input.kind !== "NOTE") {
           const data = decodeBase64(input.dataBase64);
           assertEvidencePolicy(input.contentType, data.byteLength);
+          assertEvidenceContent(input.contentType, data);
           const checksum = Array.from(
             new Uint8Array(await crypto.subtle.digest("SHA-256", data)),
           )

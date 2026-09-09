@@ -213,10 +213,12 @@ export async function runIdempotent<T>(
       .prepare(
         `SELECT operation, response_json AS responseJson
          FROM operation_idempotency
-         WHERE organization_id = ? AND actor_id = ? AND idempotency_key = ?`,
+         WHERE organization_id = ? AND site_id = ?
+           AND actor_id = ? AND idempotency_key = ?`,
       )
       .bind(
         context.session.organizationId,
+        context.session.siteId,
         context.session.userId,
         idempotencyKey,
       )

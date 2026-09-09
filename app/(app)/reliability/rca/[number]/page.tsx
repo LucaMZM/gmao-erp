@@ -11,11 +11,12 @@ import {
   UserRound,
 } from "lucide-react";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { RcaWorkspaceActions } from "@/components/reliability/rca-workspace-actions";
 import { EmptyState } from "@/components/ui/empty-state";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { can } from "@/lib/domain/permissions";
+import { hasPermission } from "@/lib/domain/governance";
 import {
   formatDate,
   formatDateTime,
@@ -33,12 +34,13 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { number } = await params;
   const session = await getCurrentSession();
-  const data = session
-    ? await getRootCauseAnalysis(
-        { organizationId: session.organizationId, siteId: session.siteId },
-        decodeURIComponent(number),
-      )
-    : null;
+  const data =
+    session && hasPermission(session.permissionCodes, "reliability.rca.manage")
+      ? await getRootCauseAnalysis(
+          { organizationId: session.organizationId, siteId: session.siteId },
+          decodeURIComponent(number),
+        )
+      : null;
   return {
     title: data ? `${data.number} · ${data.assetCode}` : `RCA ${number}`,
     description: data?.problem ?? "Análisis de causa raíz industrial.",
@@ -51,6 +53,8 @@ export default async function RootCauseAnalysisPage({
   params: Params;
 }) {
   const session = await requireDemoSession();
+  if (!hasPermission(session.permissionCodes, "reliability.rca.manage"))
+    redirect("/overview");
   const { number } = await params;
   const data = await getRootCauseAnalysis(
     { organizationId: session.organizationId, siteId: session.siteId },

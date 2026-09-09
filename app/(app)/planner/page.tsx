@@ -7,9 +7,11 @@ import {
   UsersRound,
 } from "lucide-react";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { PlannerBoard } from "@/components/planner/planner-board";
 import { PageHeader } from "@/components/ui/page-header";
 import { can } from "@/lib/domain/permissions";
+import { hasPermission } from "@/lib/domain/governance";
 import { requireDemoSession } from "@/lib/server/auth";
 import { getPlannerData } from "@/lib/server/repositories/planner";
 import { getActiveFieldTechnicians } from "@/lib/server/repositories/field";
@@ -29,6 +31,8 @@ export default async function PlannerPage({
   const requestedWeek =
     typeof params.week === "string" ? params.week : undefined;
   const session = await requireDemoSession();
+  if (!hasPermission(session.permissionCodes, "planning.manage"))
+    redirect("/overview");
   const scope = {
     organizationId: session.organizationId,
     siteId: session.siteId,

@@ -8,11 +8,13 @@ import {
   TimerReset,
 } from "lucide-react";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { MaintenancePlanCreateDialog } from "@/components/preventive/maintenance-plan-create-dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { can } from "@/lib/domain/permissions";
+import { hasPermission } from "@/lib/domain/governance";
 import {
   calendarUnitLabels,
   formatDateTime,
@@ -48,6 +50,8 @@ export default async function MaintenancePlansPage({
 }) {
   const filters = await searchParams;
   const session = await requireDemoSession();
+  if (!hasPermission(session.permissionCodes, "preventive.manage"))
+    redirect("/overview");
   const data = await listMaintenancePlans(
     { organizationId: session.organizationId, siteId: session.siteId },
     filters,

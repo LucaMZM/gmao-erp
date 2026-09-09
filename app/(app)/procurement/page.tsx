@@ -9,6 +9,7 @@ import {
   Truck,
 } from "lucide-react";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import {
   RequisitionCreateDialog,
   TransferWorkspace,
@@ -17,16 +18,20 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { can } from "@/lib/domain/permissions";
+import { hasPermission } from "@/lib/domain/governance";
 import { formatCurrency, formatDateTime } from "@/lib/presentation";
 import { requireDemoSession } from "@/lib/server/auth";
 import { getProcurementCenter } from "@/lib/server/repositories/procurement";
+import { tenantScope } from "@/lib/server/repositories/shared";
 
 export default async function ProcurementPage() {
   const session = await requireDemoSession();
-  const data = await getProcurementCenter({
-    organizationId: session.organizationId,
-    siteId: session.siteId,
-  });
+  if (
+    !hasPermission(session.permissionCodes, "procurement.approve") &&
+    !hasPermission(session.permissionCodes, "procurement.receive")
+  )
+    redirect("/overview");
+  const data = await getProcurementCenter(tenantScope(session));
   const signals = [
     {
       label: "Pendientes aprobación",

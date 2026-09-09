@@ -10,11 +10,12 @@ import {
   Wrench,
 } from "lucide-react";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { MaintenancePlanActions } from "@/components/preventive/maintenance-plan-actions";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { can } from "@/lib/domain/permissions";
+import { hasPermission } from "@/lib/domain/governance";
 import {
   calendarUnitLabels,
   formatDateTime,
@@ -31,6 +32,8 @@ export default async function MaintenancePlanDetailPage({
   params: Promise<{ code: string }>;
 }) {
   const session = await requireDemoSession();
+  if (!hasPermission(session.permissionCodes, "preventive.manage"))
+    redirect("/overview");
   const code = decodeURIComponent((await params).code);
   const data = await getMaintenancePlanDetail(
     { organizationId: session.organizationId, siteId: session.siteId },

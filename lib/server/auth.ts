@@ -5,7 +5,10 @@ import { ensureDatabase } from "./database";
 import { hashToken, randomToken, verifyPassword } from "./crypto";
 import { ApiContractError } from "./http";
 import type { EnterprisePermission } from "@/lib/domain/governance";
-import { nextLoginFailureState } from "@/lib/domain/auth-security";
+import {
+  nextLoginFailureState,
+  sessionRotationWindow,
+} from "@/lib/domain/auth-security";
 
 export const SESSION_COOKIE = "mazmi_session";
 const DEFAULT_POLICY = {
@@ -38,6 +41,8 @@ export type DemoUserSession = {
   absoluteExpiresAt: string;
   idleExpiresAt: string;
   rotatedAt: string | null;
+  sessionFamilyId: string;
+  createdAt: string;
   permissionCodes: EnterprisePermission[];
   fullAreaAccess: boolean;
   fullWarehouseAccess: boolean;
@@ -160,6 +165,8 @@ export async function getCurrentSession(): Promise<DemoUserSession | null> {
       COALESCE(s.absolute_expires_at, s.expires_at) AS absoluteExpiresAt,
       COALESCE(s.idle_expires_at, s.expires_at) AS idleExpiresAt,
       s.rotated_at AS rotatedAt
+      ,COALESCE(s.session_family_id, s.id) AS sessionFamilyId
+      ,s.created_at AS createdAt
     FROM sessions s
     INNER JOIN users u ON u.id = s.user_id
     INNER JOIN memberships m ON m.user_id = u.id AND m.organization_id = s.organization_id
@@ -395,9 +402,15 @@ export async function createDemoSession(
   const cookieStore = await cookies();
   const previousToken = cookieStore.get(SESSION_COOKIE)?.value;
   if (previousToken) {
+    const previousHash = await hashToken(previousToken);
     await getD1()
-      .prepare("UPDATE sessions SET revoked_at = ? WHERE token_hash = ?")
-      .bind(now.toISOString(), await hashToken(previousToken))
+      .prepare(
+        `UPDATE sessions SET revoked_at = ?
+         WHERE token_hash = ? OR session_family_id = (
+           SELECT COALESCE(session_family_id, id) FROM sessions WHERE token_hash = ?
+         )`,
+      )
+      .bind(now.toISOString(), previousHash, previousHash)
       .run();
   }
   await getD1().batch([
@@ -468,26 +481,62 @@ export async function createDemoSession(
 
 async function rotateSessionIfDue(session: DemoUserSession): Promise<void> {
   const policy = await getAuthPolicy(session.organizationId);
-  const rotatedAt = new Date(session.rotatedAt ?? session.expiresAt).getTime();
+  const rotatedAt = new Date(session.rotatedAt ?? session.createdAt).getTime();
   if (Date.now() - rotatedAt < policy.rotationMinutes * 60_000) return;
+  const cookieStore = await cookies();
+  const presentedToken = cookieStore.get(SESSION_COOKIE)?.value;
+  if (!presentedToken) return;
+  const presentedTokenHash = await hashToken(presentedToken);
   const token = randomToken();
   const tokenHash = await hashToken(token);
   const now = new Date();
-  const result = await getD1()
-    .prepare(
-      `UPDATE sessions SET token_hash = ?, rotated_at = ?, last_seen_at = ?
-       WHERE id = ? AND revoked_at IS NULL AND token_hash <> ?`,
-    )
-    .bind(
-      tokenHash,
-      now.toISOString(),
-      now.toISOString(),
-      session.sessionId,
-      tokenHash,
-    )
-    .run();
-  if (Number(result.meta?.changes ?? 0) !== 1) return;
-  const cookieStore = await cookies();
+  const nextSessionId = `session-${randomToken(12)}`;
+  const rotationAnchor = session.rotatedAt ?? session.createdAt;
+  const window = sessionRotationWindow(now, session, policy.idleMinutes);
+  const results = await getD1().batch([
+    getD1()
+      .prepare(
+        `INSERT INTO sessions (
+          id, token_hash, user_id, organization_id, current_site_id,
+          expires_at, absolute_expires_at, idle_expires_at, rotated_at,
+          session_family_id, created_at, last_seen_at, revoked_at
+        )
+        SELECT ?, ?, user_id, organization_id, current_site_id,
+          expires_at, absolute_expires_at, ?, ?, COALESCE(session_family_id, id),
+          ?, ?, NULL
+        FROM sessions
+        WHERE id = ? AND token_hash = ? AND revoked_at IS NULL
+          AND COALESCE(rotated_at, created_at) = ?`,
+      )
+      .bind(
+        nextSessionId,
+        tokenHash,
+        window.idleExpiresAt,
+        now.toISOString(),
+        now.toISOString(),
+        now.toISOString(),
+        session.sessionId,
+        presentedTokenHash,
+        rotationAnchor,
+      ),
+    getD1()
+      .prepare(
+        `UPDATE sessions
+         SET expires_at = MIN(expires_at, ?),
+           idle_expires_at = MIN(COALESCE(idle_expires_at, expires_at), ?),
+           rotated_at = ?, last_seen_at = ?
+         WHERE id = ? AND EXISTS (SELECT 1 FROM sessions WHERE id = ?)`,
+      )
+      .bind(
+        window.previousTokenExpiresAt,
+        window.previousTokenExpiresAt,
+        now.toISOString(),
+        now.toISOString(),
+        session.sessionId,
+        nextSessionId,
+      ),
+  ]);
+  if (Number(results[0]?.meta?.changes ?? 0) !== 1) return;
   cookieStore.set(SESSION_COOKIE, token, {
     httpOnly: true,
     sameSite: "lax",
@@ -505,7 +554,9 @@ export async function destroyDemoSession(): Promise<void> {
     await ensureDatabase();
     const session = await getD1()
       .prepare(
-        "SELECT id, user_id AS userId, organization_id AS organizationId, current_site_id AS siteId FROM sessions WHERE token_hash = ?",
+        `SELECT id, user_id AS userId, organization_id AS organizationId,
+          current_site_id AS siteId, COALESCE(session_family_id, id) AS familyId
+         FROM sessions WHERE token_hash = ?`,
       )
       .bind(tokenHash)
       .first<{
@@ -513,11 +564,16 @@ export async function destroyDemoSession(): Promise<void> {
         userId: string;
         organizationId: string;
         siteId: string;
+        familyId: string;
       }>();
-    await getD1()
-      .prepare("UPDATE sessions SET revoked_at = ? WHERE token_hash = ?")
-      .bind(new Date().toISOString(), tokenHash)
-      .run();
+    if (session) {
+      await getD1()
+        .prepare(
+          "UPDATE sessions SET revoked_at = ? WHERE id = ? OR session_family_id = ?",
+        )
+        .bind(new Date().toISOString(), session.id, session.familyId)
+        .run();
+    }
     if (session) {
       await appendAuthAudit({
         organizationId: session.organizationId,
@@ -560,9 +616,15 @@ export async function switchCurrentSite(
   }
   await getD1()
     .prepare(
-      "UPDATE sessions SET current_site_id = ?, last_seen_at = ? WHERE id = ?",
+      `UPDATE sessions SET current_site_id = ?, last_seen_at = ?
+       WHERE id = ? OR (session_family_id = ? AND revoked_at IS NULL)`,
     )
-    .bind(siteId, new Date().toISOString(), session.sessionId)
+    .bind(
+      siteId,
+      new Date().toISOString(),
+      session.sessionId,
+      session.sessionFamilyId,
+    )
     .run();
   await appendAuthAudit({
     organizationId: session.organizationId,

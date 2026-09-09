@@ -3,6 +3,27 @@ export type LoginThrottlePolicy = {
   lockoutMinutes: number;
 };
 
+export const SESSION_ROTATION_GRACE_MS = 10_000;
+
+export function sessionRotationWindow(
+  now: Date,
+  session: { expiresAt: string; absoluteExpiresAt: string },
+  idleMinutes: number,
+): { previousTokenExpiresAt: string; idleExpiresAt: string } {
+  const hardExpiry = Math.min(
+    new Date(session.expiresAt).getTime(),
+    new Date(session.absoluteExpiresAt).getTime(),
+  );
+  return {
+    previousTokenExpiresAt: new Date(
+      Math.min(now.getTime() + SESSION_ROTATION_GRACE_MS, hardExpiry),
+    ).toISOString(),
+    idleExpiresAt: new Date(
+      Math.min(now.getTime() + idleMinutes * 60_000, hardExpiry),
+    ).toISOString(),
+  };
+}
+
 export function nextLoginFailureState(
   failedAttempts: number,
   now: Date,

@@ -1,5 +1,12 @@
 import type { SqlValue, TenantScope } from "./shared";
-import { normalizePage, normalizeQuery, queryAll, queryFirst } from "./shared";
+import {
+  normalizePage,
+  normalizeQuery,
+  locationScopePredicate,
+  queryAll,
+  queryFirst,
+  warehouseScopePredicate,
+} from "./shared";
 
 const PAGE_SIZE = 24;
 
@@ -125,6 +132,27 @@ export async function listInventory(
   const stockState = normalizeQuery(filters.stock, 30);
   const critical = normalizeQuery(filters.critical, 10);
   const selectedId = normalizeQuery(filters.part, 80);
+  const warehouseScope = warehouseScopePredicate(
+    scope,
+    "scoped_bin.warehouse_id",
+  );
+  const movementWarehouseScope = warehouseScopePredicate(
+    scope,
+    "movement_bin.warehouse_id",
+  );
+  const locationWarehouseScope = warehouseScopePredicate(scope, "warehouse.id");
+  const substituteWarehouseScope = warehouseScopePredicate(
+    scope,
+    "substitute_bin.warehouse_id",
+  );
+  const consumptionWarehouseScope = warehouseScopePredicate(
+    scope,
+    "consumption_bin.warehouse_id",
+  );
+  const compatibleAssetScope = locationScopePredicate(
+    scope,
+    "asset.functional_location_id",
+  );
   const conditions = ["stock.site_id = ?", "part.status = ?"];
   const params: SqlValue[] = [scope.siteId, "ACTIVE"];
 
@@ -152,10 +180,15 @@ export async function listInventory(
     queryFirst<{ count: number }>(
       `
       WITH stock AS (
-        SELECT part_id, site_id, MIN(bin_id) AS bin_id,
-          SUM(on_hand) AS on_hand, SUM(reserved) AS reserved,
-          SUM(on_order) AS on_order, COUNT(*) AS location_count
-        FROM stock_levels WHERE site_id = ? GROUP BY part_id, site_id
+        SELECT stock_level.part_id, stock_level.site_id,
+          MIN(stock_level.bin_id) AS bin_id,
+          SUM(stock_level.on_hand) AS on_hand,
+          SUM(stock_level.reserved) AS reserved,
+          SUM(stock_level.on_order) AS on_order, COUNT(*) AS location_count
+        FROM stock_levels stock_level
+        INNER JOIN warehouse_bins scoped_bin ON scoped_bin.id = stock_level.bin_id
+        WHERE stock_level.site_id = ? AND ${warehouseScope.sql}
+        GROUP BY stock_level.part_id, stock_level.site_id
       )
       SELECT COUNT(*) AS count
       FROM parts part
@@ -164,15 +197,20 @@ export async function listInventory(
       INNER JOIN part_site_policies policy ON policy.part_id = part.id AND policy.site_id = stock.site_id
       WHERE ${where}
     `,
-      [scope.siteId, ...params],
+      [scope.siteId, ...warehouseScope.params, ...params],
     ),
     queryAll<InventoryListItem>(
       `
       WITH stock AS (
-        SELECT part_id, site_id, MIN(bin_id) AS bin_id,
-          SUM(on_hand) AS on_hand, SUM(reserved) AS reserved,
-          SUM(on_order) AS on_order, COUNT(*) AS location_count
-        FROM stock_levels WHERE site_id = ? GROUP BY part_id, site_id
+        SELECT stock_level.part_id, stock_level.site_id,
+          MIN(stock_level.bin_id) AS bin_id,
+          SUM(stock_level.on_hand) AS on_hand,
+          SUM(stock_level.reserved) AS reserved,
+          SUM(stock_level.on_order) AS on_order, COUNT(*) AS location_count
+        FROM stock_levels stock_level
+        INNER JOIN warehouse_bins scoped_bin ON scoped_bin.id = stock_level.bin_id
+        WHERE stock_level.site_id = ? AND ${warehouseScope.sql}
+        GROUP BY stock_level.part_id, stock_level.site_id
       )
       SELECT
         part.id,
@@ -211,7 +249,13 @@ export async function listInventory(
         part.sku
       LIMIT ? OFFSET ?
     `,
-      [scope.siteId, ...params, PAGE_SIZE, (page - 1) * PAGE_SIZE],
+      [
+        scope.siteId,
+        ...warehouseScope.params,
+        ...params,
+        PAGE_SIZE,
+        (page - 1) * PAGE_SIZE,
+      ],
     ),
     queryAll<{ code: string; name: string }>(
       `
@@ -229,9 +273,14 @@ export async function listInventory(
     }>(
       `
       WITH stock AS (
-        SELECT part_id, site_id, SUM(on_hand) AS on_hand,
-          SUM(reserved) AS reserved, SUM(on_order) AS on_order
-        FROM stock_levels WHERE site_id = ? GROUP BY part_id, site_id
+        SELECT stock_level.part_id, stock_level.site_id,
+          SUM(stock_level.on_hand) AS on_hand,
+          SUM(stock_level.reserved) AS reserved,
+          SUM(stock_level.on_order) AS on_order
+        FROM stock_levels stock_level
+        INNER JOIN warehouse_bins scoped_bin ON scoped_bin.id = stock_level.bin_id
+        WHERE stock_level.site_id = ? AND ${warehouseScope.sql}
+        GROUP BY stock_level.part_id, stock_level.site_id
       )
       SELECT
         SUM(CASE WHEN (stock.on_hand - stock.reserved) <= policy.reorder_point THEN 1 ELSE 0 END) AS belowReorder,
@@ -242,7 +291,7 @@ export async function listInventory(
       INNER JOIN part_site_policies policy ON policy.part_id = stock.part_id AND policy.site_id = stock.site_id
       WHERE stock.site_id = ?
     `,
-      [scope.siteId, scope.siteId],
+      [scope.siteId, ...warehouseScope.params, scope.siteId],
     ),
   ]);
 
@@ -253,10 +302,15 @@ export async function listInventory(
     >(
       `
       WITH stock AS (
-        SELECT part_id, site_id, MIN(bin_id) AS bin_id,
-          SUM(on_hand) AS on_hand, SUM(reserved) AS reserved,
-          SUM(on_order) AS on_order, COUNT(*) AS location_count
-        FROM stock_levels WHERE site_id = ? GROUP BY part_id, site_id
+        SELECT stock_level.part_id, stock_level.site_id,
+          MIN(stock_level.bin_id) AS bin_id,
+          SUM(stock_level.on_hand) AS on_hand,
+          SUM(stock_level.reserved) AS reserved,
+          SUM(stock_level.on_order) AS on_order, COUNT(*) AS location_count
+        FROM stock_levels stock_level
+        INNER JOIN warehouse_bins scoped_bin ON scoped_bin.id = stock_level.bin_id
+        WHERE stock_level.site_id = ? AND ${warehouseScope.sql}
+        GROUP BY stock_level.part_id, stock_level.site_id
       )
       SELECT
         part.id, part.sku, part.name, part.description, category.name AS categoryName,
@@ -278,7 +332,12 @@ export async function listInventory(
       WHERE part.id = ? AND part.organization_id = ?
       LIMIT 1
     `,
-      [scope.siteId, selectedId, scope.organizationId],
+      [
+        scope.siteId,
+        ...warehouseScope.params,
+        selectedId,
+        scope.organizationId,
+      ],
     );
     if (selectedPart) {
       const [movements, assets, locations, offers, substitutes, consumption] =
@@ -296,12 +355,14 @@ export async function listInventory(
             wo.number AS workOrderNumber
           FROM inventory_movements movement
           INNER JOIN users actor ON actor.id = movement.actor_id
+          INNER JOIN warehouse_bins movement_bin ON movement_bin.id = movement.bin_id
           LEFT JOIN work_orders wo ON wo.id = movement.work_order_id
           WHERE movement.part_id = ? AND movement.site_id = ?
+            AND ${movementWarehouseScope.sql}
           ORDER BY movement.occurred_at DESC
           LIMIT 12
         `,
-            [selectedPart.id, scope.siteId],
+            [selectedPart.id, scope.siteId, ...movementWarehouseScope.params],
           ),
           queryAll<InventoryCompatibleAsset>(
             `
@@ -310,10 +371,11 @@ export async function listInventory(
           FROM asset_part_compatibilities compatibility
           INNER JOIN assets asset ON asset.id = compatibility.asset_id
           WHERE compatibility.part_id = ? AND asset.site_id = ?
+            AND ${compatibleAssetScope.sql}
           ORDER BY compatibility.relation DESC, asset.code
           LIMIT 8
         `,
-            [selectedPart.id, scope.siteId],
+            [selectedPart.id, scope.siteId, ...compatibleAssetScope.params],
           ),
           queryAll<InventoryLocationRow>(
             `SELECT stock.id, warehouse.name AS warehouseName,
@@ -325,8 +387,9 @@ export async function listInventory(
            INNER JOIN warehouses warehouse ON warehouse.id = bin.warehouse_id
            LEFT JOIN warehouse_zones zone ON zone.id = bin.zone_id
            WHERE stock.part_id = ? AND stock.site_id = ?
+             AND ${locationWarehouseScope.sql}
            ORDER BY warehouse.code, zone.code, bin.code`,
-            [selectedPart.id, scope.siteId],
+            [selectedPart.id, scope.siteId, ...locationWarehouseScope.params],
           ),
           queryAll<InventoryOfferRow>(
             `SELECT offer.id, vendor.name AS vendorName,
@@ -343,23 +406,40 @@ export async function listInventory(
           queryAll<InventorySubstituteRow>(
             `SELECT substitute.id, part.id AS partId, part.sku, part.name,
             COALESCE((SELECT SUM(stock.on_hand - stock.reserved)
-              FROM stock_levels stock WHERE stock.part_id = part.id AND stock.site_id = ?), 0) AS available,
+              FROM stock_levels stock
+              INNER JOIN warehouse_bins substitute_bin ON substitute_bin.id = stock.bin_id
+              WHERE stock.part_id = part.id AND stock.site_id = ?
+                AND ${substituteWarehouseScope.sql}), 0) AS available,
             substitute.note
            FROM part_substitutes substitute
            INNER JOIN parts part ON part.id = substitute.substitute_part_id
            WHERE substitute.part_id = ? AND substitute.organization_id = ?
              AND substitute.approval_status = 'APPROVED'
            ORDER BY part.sku`,
-            [scope.siteId, selectedPart.id, scope.organizationId],
+            [
+              scope.siteId,
+              ...substituteWarehouseScope.params,
+              selectedPart.id,
+              scope.organizationId,
+            ],
           ),
           queryFirst<{ quantity: number }>(
             `SELECT COALESCE(SUM(usage.quantity), 0) AS quantity
            FROM work_order_part_usages usage
            INNER JOIN work_orders wo ON wo.id = usage.work_order_id
+           INNER JOIN inventory_movements consumption_movement
+             ON consumption_movement.id = usage.movement_id
+           INNER JOIN warehouse_bins consumption_bin
+             ON consumption_bin.id = consumption_movement.bin_id
            WHERE usage.part_id = ? AND wo.site_id = ?
+             AND ${consumptionWarehouseScope.sql}
              AND usage.usage_type = 'CONSUMPTION'
              AND usage.created_at >= datetime('now', '-90 days')`,
-            [selectedPart.id, scope.siteId],
+            [
+              selectedPart.id,
+              scope.siteId,
+              ...consumptionWarehouseScope.params,
+            ],
           ),
         ]);
       selected = {

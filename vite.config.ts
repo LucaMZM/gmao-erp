@@ -55,6 +55,7 @@ export default defineConfig(async () => {
       cloudflare({
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
         config: localBindingConfig,
+        persistState: process.env.MAZMI_EPHEMERAL_STATE === "1" ? false : true,
       }),
     ],
   };

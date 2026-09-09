@@ -7,16 +7,18 @@ import {
   UserRound,
 } from "lucide-react";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { RequisitionActions } from "@/components/procurement/procurement-actions";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { can } from "@/lib/domain/permissions";
+import { hasPermission } from "@/lib/domain/governance";
 import { formatCurrency, formatDateTime } from "@/lib/presentation";
 import { requireDemoSession } from "@/lib/server/auth";
 import {
   getProcurementCenter,
   getRequisitionDetail,
 } from "@/lib/server/repositories/procurement";
+import { tenantScope } from "@/lib/server/repositories/shared";
 
 export default async function RequisitionDetailPage({
   params,
@@ -24,11 +26,13 @@ export default async function RequisitionDetailPage({
   params: Promise<{ number: string }>;
 }) {
   const session = await requireDemoSession();
+  if (
+    !hasPermission(session.permissionCodes, "procurement.approve") &&
+    !hasPermission(session.permissionCodes, "procurement.receive")
+  )
+    redirect("/overview");
   const { number } = await params;
-  const scope = {
-    organizationId: session.organizationId,
-    siteId: session.siteId,
-  };
+  const scope = tenantScope(session);
   const [data, center] = await Promise.all([
     getRequisitionDetail(scope, decodeURIComponent(number)),
     getProcurementCenter(scope),

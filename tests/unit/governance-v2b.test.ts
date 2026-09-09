@@ -10,11 +10,13 @@ import {
 } from "@/lib/domain/production-calendar";
 import { laborCostCents, totalWorkOrderCostCents } from "@/lib/domain/costs";
 import {
+  assertEvidenceContent,
   assertEvidencePolicy,
   sanitizeEvidenceFileName,
 } from "@/lib/domain/evidence-policy";
 import {
   nextLoginFailureState,
+  sessionRotationWindow,
   sessionIsValid,
 } from "@/lib/domain/auth-security";
 import { isOfflineOperationSupported } from "@/lib/client/offline-queue";
@@ -127,6 +129,23 @@ describe("V2B governance and enterprise invariants", () => {
     ).toBe(false);
   });
 
+  it("bounds the concurrent-request grace window by hard session expiry", () => {
+    const now = new Date("2026-09-09T10:00:00.000Z");
+    expect(
+      sessionRotationWindow(
+        now,
+        {
+          expiresAt: "2026-09-09T12:00:00.000Z",
+          absoluteExpiresAt: "2026-09-09T10:00:05.000Z",
+        },
+        120,
+      ),
+    ).toEqual({
+      previousTokenExpiresAt: "2026-09-09T10:00:05.000Z",
+      idleExpiresAt: "2026-09-09T10:00:05.000Z",
+    });
+  });
+
   it("uses the hosted PBKDF2 limit while accepting legacy local hashes", async () => {
     const salt = "6d617a6d692d666163746f72792d7630";
     const current = await derivePasswordHash("Mazmi2026!", salt);
@@ -152,6 +171,18 @@ describe("V2B governance and enterprise invariants", () => {
     expect(() => assertEvidencePolicy("image/png", 20_000_000)).toThrowError(
       /10 MB/i,
     );
+    expect(() =>
+      assertEvidenceContent(
+        "image/png",
+        new TextEncoder().encode("<html>not an image</html>").buffer,
+      ),
+    ).toThrowError(/no coincide/i);
+    expect(() =>
+      assertEvidenceContent(
+        "image/png",
+        new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).buffer,
+      ),
+    ).not.toThrow();
   });
 
   it("queues only safe field operations while critical mutations stay online", () => {
