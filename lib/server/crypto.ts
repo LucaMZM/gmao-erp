@@ -1,4 +1,5 @@
-const PASSWORD_ITERATIONS = 120_000;
+const PASSWORD_ITERATIONS = 100_000;
+const LEGACY_PASSWORD_ITERATIONS = 120_000;
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
@@ -18,6 +19,7 @@ function hexToBuffer(hex: string): ArrayBuffer {
 export async function derivePasswordHash(
   password: string,
   saltHex: string,
+  iterations = PASSWORD_ITERATIONS,
 ): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
@@ -31,7 +33,7 @@ export async function derivePasswordHash(
       name: "PBKDF2",
       hash: "SHA-256",
       salt: hexToBuffer(saltHex),
-      iterations: PASSWORD_ITERATIONS,
+      iterations,
     },
     key,
     256,
@@ -44,11 +46,32 @@ export async function verifyPassword(
   saltHex: string,
   expectedHash: string,
 ): Promise<boolean> {
-  const actual = await derivePasswordHash(password, saltHex);
-  if (actual.length !== expectedHash.length) return false;
+  const current = await derivePasswordHash(password, saltHex);
+  if (constantTimeHexMatch(current, expectedHash)) return true;
+
+  try {
+    const legacy = await derivePasswordHash(
+      password,
+      saltHex,
+      LEGACY_PASSWORD_ITERATIONS,
+    );
+    return constantTimeHexMatch(legacy, expectedHash);
+  } catch (error) {
+    // Cloudflare Workers caps PBKDF2 at 100k iterations. New hashes use that
+    // platform maximum; the legacy attempt remains available in runtimes that
+    // support it so existing local V2A/V2B databases keep working.
+    if (error instanceof DOMException && error.name === "NotSupportedError") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function constantTimeHexMatch(actual: string, expected: string): boolean {
+  if (actual.length !== expected.length) return false;
   let difference = 0;
   for (let index = 0; index < actual.length; index += 1) {
-    difference |= actual.charCodeAt(index) ^ expectedHash.charCodeAt(index);
+    difference |= actual.charCodeAt(index) ^ expected.charCodeAt(index);
   }
   return difference === 0;
 }

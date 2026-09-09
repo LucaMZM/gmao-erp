@@ -19,6 +19,7 @@ import {
 } from "@/lib/domain/auth-security";
 import { isOfflineOperationSupported } from "@/lib/client/offline-queue";
 import { reportingCsv } from "@/lib/domain/reporting";
+import { derivePasswordHash, verifyPassword } from "@/lib/server/crypto";
 
 describe("V2B governance and enterprise invariants", () => {
   it("enforces explicit permission grants", () => {
@@ -124,6 +125,22 @@ describe("V2B governance and enterprise invariants", () => {
         revokedAt: null,
       }),
     ).toBe(false);
+  });
+
+  it("uses the hosted PBKDF2 limit while accepting legacy local hashes", async () => {
+    const salt = "6d617a6d692d666163746f72792d7630";
+    const current = await derivePasswordHash("Mazmi2026!", salt);
+    const legacy = await derivePasswordHash("Mazmi2026!", salt, 120_000);
+
+    await expect(verifyPassword("Mazmi2026!", salt, current)).resolves.toBe(
+      true,
+    );
+    await expect(verifyPassword("Mazmi2026!", salt, legacy)).resolves.toBe(
+      true,
+    );
+    await expect(verifyPassword("incorrecta", salt, current)).resolves.toBe(
+      false,
+    );
   });
 
   it("hardens attachment type, size and safe file name", () => {
