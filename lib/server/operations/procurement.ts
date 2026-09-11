@@ -13,8 +13,10 @@ import {
 import { assertPermission } from "@/lib/domain/permissions";
 import { ApiContractError } from "@/lib/server/http";
 import {
+  atomicBatch,
   assertMutationApplied,
   assertWarehouseScope,
+  assertLocationScope,
   jsonValue,
   nextPlantNumber,
   operationId,
@@ -261,11 +263,11 @@ async function findWorkOrder(
   if (!number) return null;
   const row = await getD1()
     .prepare(
-      `SELECT id, number FROM work_orders
+      `SELECT id, number, functional_location_id AS functionalLocationId FROM work_orders
        WHERE organization_id = ? AND site_id = ? AND number = ? LIMIT 1`,
     )
     .bind(context.session.organizationId, context.session.siteId, number)
-    .first<{ id: string; number: string }>();
+    .first<{ id: string; number: string; functionalLocationId: string }>();
   if (!row) {
     throw new ApiContractError(
       404,
@@ -273,7 +275,28 @@ async function findWorkOrder(
       "La orden no existe en el centro activo.",
     );
   }
+  await assertLocationScope(context.session, row.functionalLocationId);
   return row;
+}
+
+async function assertContextualWorkOrderScope(
+  context: OperationContext,
+  workOrderId: string | null,
+) {
+  if (!workOrderId) return;
+  const work = await getD1()
+    .prepare(
+      "SELECT functional_location_id AS locationId FROM work_orders WHERE id = ? AND organization_id = ? AND site_id = ?",
+    )
+    .bind(workOrderId, context.session.organizationId, context.session.siteId)
+    .first<{ locationId: string }>();
+  if (!work)
+    throw new ApiContractError(
+      404,
+      "WORK_ORDER_NOT_FOUND",
+      "La orden no existe en el centro activo.",
+    );
+  await assertLocationScope(context.session, work.locationId);
 }
 
 export async function createPurchaseRequisition(
@@ -328,71 +351,77 @@ export async function createPurchaseRequisition(
   const id = operationId("requisition");
   const status: RequisitionStatus = input.submit ? "SUBMITTED" : "DRAFT";
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `INSERT INTO purchase_requisitions
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `INSERT INTO purchase_requisitions
           (id, organization_id, site_id, warehouse_id, work_order_id, number,
            origin, urgency, need_by, justification, status, requested_by_id,
            approved_by_id, approved_at, decision_reason, version, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 1, ?, ?)`,
-      )
-      .bind(
-        id,
-        context.session.organizationId,
-        context.session.siteId,
-        warehouse.warehouseId,
-        workOrder?.id ?? null,
-        number,
-        input.origin,
-        input.urgency,
-        input.needBy ?? null,
-        input.justification.trim(),
-        status,
-        context.session.userId,
-        now,
-        now,
-      ),
-    db
-      .prepare(
-        `INSERT INTO purchase_requisition_lines
+        )
+        .bind(
+          id,
+          context.session.organizationId,
+          context.session.siteId,
+          warehouse.warehouseId,
+          workOrder?.id ?? null,
+          number,
+          input.origin,
+          input.urgency,
+          input.needBy ?? null,
+          input.justification.trim(),
+          status,
+          context.session.userId,
+          now,
+          now,
+        ),
+      db
+        .prepare(
+          `INSERT INTO purchase_requisition_lines
           (id, purchase_requisition_id, part_id, quantity,
            available_snapshot, on_order_snapshot, note)
          VALUES (?, ?, ?, ?, ?, ?, NULL)`,
-      )
-      .bind(
-        operationId("requisition-line"),
-        id,
-        part.partId,
-        input.quantity,
-        part.available,
-        part.onOrder,
-      ),
-    eventStatement(db, context, {
-      entityType: "PURCHASE_REQUISITION",
-      entityId: id,
-      eventType: input.submit ? "REQUISITION_SUBMITTED" : "REQUISITION_CREATED",
-      toStatus: status,
-      note: `${part.sku} × ${input.quantity} ${part.unit}${workOrder ? ` para ${workOrder.number}` : ""}.`,
-      now,
-    }),
-    auditStatement(db, context, {
-      action: input.submit
-        ? "PURCHASE_REQUISITION_SUBMITTED"
-        : "PURCHASE_REQUISITION_CREATED",
-      entityType: "PURCHASE_REQUISITION",
-      entityId: id,
-      previousValue: null,
-      newValue: {
-        number,
-        status,
-        partId: part.partId,
-        quantity: input.quantity,
-        workOrderId: workOrder?.id ?? null,
-      },
-      now,
-    }),
-  ]);
+        )
+        .bind(
+          operationId("requisition-line"),
+          id,
+          part.partId,
+          input.quantity,
+          part.available,
+          part.onOrder,
+        ),
+      eventStatement(db, context, {
+        entityType: "PURCHASE_REQUISITION",
+        entityId: id,
+        eventType: input.submit
+          ? "REQUISITION_SUBMITTED"
+          : "REQUISITION_CREATED",
+        toStatus: status,
+        note: `${part.sku} × ${input.quantity} ${part.unit}${workOrder ? ` para ${workOrder.number}` : ""}.`,
+        now,
+      }),
+      auditStatement(db, context, {
+        action: input.submit
+          ? "PURCHASE_REQUISITION_SUBMITTED"
+          : "PURCHASE_REQUISITION_CREATED",
+        entityType: "PURCHASE_REQUISITION",
+        entityId: id,
+        previousValue: null,
+        newValue: {
+          number,
+          status,
+          partId: part.partId,
+          quantity: input.quantity,
+          workOrderId: workOrder?.id ?? null,
+        },
+        now,
+      }),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0]);
   if (workOrder) {
     await db
@@ -434,6 +463,7 @@ async function getRequisition(
     );
   }
   assertWarehouseScope(context.session, row.warehouseId);
+  await assertContextualWorkOrderScope(context, row.workOrderId);
   return row;
 }
 
@@ -469,60 +499,64 @@ export async function changeRequisitionStatus(
   assertRequisitionTransition(requisition.status, to);
   const now = operationNow(context);
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE purchase_requisitions SET status = ?,
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE purchase_requisitions SET status = ?,
           approved_by_id = CASE WHEN ? = 'APPROVED' THEN ? ELSE approved_by_id END,
           approved_at = CASE WHEN ? = 'APPROVED' THEN ? ELSE approved_at END,
           decision_reason = ?, version = version + 1, updated_at = ?
          WHERE id = ? AND version = ? AND status = ?`,
-      )
-      .bind(
-        to,
-        to,
-        context.session.userId,
-        to,
-        now,
-        input.reason?.trim() || null,
-        now,
-        requisition.id,
-        input.version,
-        requisition.status,
-      ),
-    eventStatement(db, context, {
-      entityType: "PURCHASE_REQUISITION",
-      entityId: requisition.id,
-      eventType: `REQUISITION_${to}`,
-      fromStatus: requisition.status,
-      toStatus: to,
-      note: input.reason?.trim() || `Requisición ${to.toLowerCase()}.`,
-      now,
-      guard: {
-        table: "purchase_requisitions",
+        )
+        .bind(
+          to,
+          to,
+          context.session.userId,
+          to,
+          now,
+          input.reason?.trim() || null,
+          now,
+          requisition.id,
+          input.version,
+          requisition.status,
+        ),
+      eventStatement(db, context, {
+        entityType: "PURCHASE_REQUISITION",
         entityId: requisition.id,
-        status: to,
-        version: input.version + 1,
-      },
-    }),
-    auditStatement(db, context, {
-      action: `PURCHASE_REQUISITION_${to}`,
-      entityType: "PURCHASE_REQUISITION",
-      entityId: requisition.id,
-      previousValue: {
-        status: requisition.status,
-        version: requisition.version,
-      },
-      newValue: { status: to, reason: input.reason?.trim() || null },
-      now,
-      guard: {
-        table: "purchase_requisitions",
+        eventType: `REQUISITION_${to}`,
+        fromStatus: requisition.status,
+        toStatus: to,
+        note: input.reason?.trim() || `Requisición ${to.toLowerCase()}.`,
+        now,
+        guard: {
+          table: "purchase_requisitions",
+          entityId: requisition.id,
+          status: to,
+          version: input.version + 1,
+        },
+      }),
+      auditStatement(db, context, {
+        action: `PURCHASE_REQUISITION_${to}`,
+        entityType: "PURCHASE_REQUISITION",
         entityId: requisition.id,
-        status: to,
-        version: input.version + 1,
-      },
-    }),
-  ]);
+        previousValue: {
+          status: requisition.status,
+          version: requisition.version,
+        },
+        newValue: { status: to, reason: input.reason?.trim() || null },
+        now,
+        guard: {
+          table: "purchase_requisitions",
+          entityId: requisition.id,
+          status: to,
+          version: input.version + 1,
+        },
+      }),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0]);
 }
 
@@ -763,7 +797,7 @@ export async function convertRequisitionToPurchaseOrder(
       },
     }),
   );
-  const results = await db.batch(statements);
+  const results = await atomicBatch(db, statements, [0, 1]);
   assertMutationApplied(results[0]);
   assertMutationApplied(results[1]);
   return {
@@ -804,6 +838,7 @@ async function getPurchaseOrder(
     );
   }
   assertWarehouseScope(context.session, row.warehouseId);
+  await assertContextualWorkOrderScope(context, row.workOrderId);
   return row;
 }
 
@@ -1020,7 +1055,12 @@ export async function changePurchaseOrderStatus(
       },
     }),
   );
-  const results = await db.batch(statements);
+  const results = await atomicBatch(db, statements, [
+    0,
+    ...(to === "SENT" || (to === "CANCELLED" && order.status === "SENT")
+      ? lines.map((_, index) => 1 + index * 2)
+      : []),
+  ]);
   assertMutationApplied(results[0]);
   if (to === "SENT" || (to === "CANCELLED" && order.status === "SENT")) {
     for (let index = 1; index < 1 + lines.length * 2; index += 2) {
@@ -1367,7 +1407,11 @@ export async function receivePurchaseOrder(
         ),
     );
   }
-  const results = await db.batch(statements);
+  const results = await atomicBatch(db, statements, [
+    0,
+    1,
+    ...receiptLines.flatMap((_, index) => [3 + index * 5, 4 + index * 5]),
+  ]);
   assertMutationApplied(results[0]);
   assertMutationApplied(results[1]);
   for (let index = 0; index < receiptLines.length; index += 1) {
@@ -1717,7 +1761,12 @@ export async function changeStockTransferStatus(
       },
     }),
   );
-  const results = await db.batch(statements);
+  const results = await atomicBatch(db, statements, [
+    0,
+    ...(to === "IN_TRANSIT" || to === "RECEIVED"
+      ? lines.map((_, index) => 1 + index * 2)
+      : []),
+  ]);
   assertMutationApplied(results[0]);
   for (
     let index = 1;

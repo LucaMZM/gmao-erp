@@ -7,6 +7,7 @@ export type OperationContext = {
   session: DemoUserSession;
   requestId: string;
   now?: string;
+  idempotencyReservationId?: string;
 };
 
 export function operationId(prefix: string): string {
@@ -98,6 +99,78 @@ export function assertMutationApplied(
   }
 }
 
+/** Check CAS results inside the transaction, not after D1 has committed it.
+ * The assertion INSERT selects no rows on success; on failure its CHECK aborts
+ * every statement in the batch, including earlier writes and audit entries.
+ */
+export async function atomicBatch(
+  db: D1Database,
+  statements: D1PreparedStatement[],
+  requiredChanges: readonly number[] = [0],
+): Promise<D1Result<unknown>[]> {
+  const required = new Set(requiredChanges);
+  const indices: number[] = [];
+  let assertionCount = 0;
+  const guarded = statements.flatMap((statement, index) => {
+    indices.push(index + assertionCount);
+    if (required.has(index)) assertionCount += 1;
+    return required.has(index)
+      ? [
+          statement,
+          db.prepare(
+            "INSERT INTO _mutation_assertions (affected_rows) SELECT changes() WHERE changes() <> 1",
+          ),
+        ]
+      : [statement];
+  });
+  try {
+    const results = await db.batch(guarded);
+    return indices.map((index) => results[index]);
+  } catch (error) {
+    for (const code of [
+      "ACTIVE_LABOR_SESSION_EXISTS",
+      "ACTIVE_DOWNTIME_EXISTS",
+      "RESERVED_MATERIALS",
+      "FINAL_WORK_ORDER",
+    ] as const) {
+      if (String(error).includes(code))
+        throw new ApiContractError(
+          409,
+          code,
+          "El estado de la orden ha cambiado o mantiene operaciones pendientes. Actualiza antes de continuar.",
+        );
+    }
+    if (
+      String(error).includes("UNIQUE constraint failed: labor_sessions.user_id")
+    ) {
+      throw new ApiContractError(
+        409,
+        "ACTIVE_LABOR_SESSION_EXISTS",
+        "El técnico ya tiene una sesión activa.",
+      );
+    }
+    if (
+      String(error).includes(
+        "UNIQUE constraint failed: downtime_events.work_order_id",
+      )
+    ) {
+      throw new ApiContractError(
+        409,
+        "ACTIVE_DOWNTIME_EXISTS",
+        "La orden ya tiene un downtime activo.",
+      );
+    }
+    if (String(error).includes("ck_atomic_mutation_applied")) {
+      throw new ApiContractError(
+        409,
+        "CONCURRENT_MODIFICATION",
+        "El registro cambió en otra operación. Actualiza y reintenta.",
+      );
+    }
+    throw error;
+  }
+}
+
 export async function assertLocationScope(
   session: DemoUserSession,
   functionalLocationId: string,
@@ -179,6 +252,7 @@ export async function runIdempotent<T>(
   idempotencyKey: string | null,
   operation: string,
   execute: () => Promise<T>,
+  requestIdentity?: unknown,
 ): Promise<{ value: T; replayed: boolean }> {
   if (!idempotencyKey) return { value: await execute(), replayed: false };
   if (!/^[a-zA-Z0-9:_-]{12,120}$/.test(idempotencyKey)) {
@@ -189,6 +263,13 @@ export async function runIdempotent<T>(
     );
   }
   const db = getD1();
+  if (requestIdentity !== undefined) {
+    const hash = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(JSON.stringify(requestIdentity)),
+    );
+    operation += `:${Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  }
   const id = operationId("idempotency");
   const now = operationNow(context);
   const reservation = await db
@@ -240,19 +321,51 @@ export async function runIdempotent<T>(
     return { value: JSON.parse(existing.responseJson) as T, replayed: true };
   }
   try {
+    context.idempotencyReservationId = id;
     const value = await execute();
-    await db
-      .prepare(
-        "UPDATE operation_idempotency SET response_json = ? WHERE id = ?",
-      )
-      .bind(JSON.stringify(value), id)
-      .run();
+    // The business batch persists its response before committing, never here.
+    const committed = await db
+      .prepare("SELECT response_json FROM operation_idempotency WHERE id = ?")
+      .bind(id)
+      .first<{ response_json: string | null }>();
+    if (!committed?.response_json)
+      throw new Error("IDEMPOTENCY_TRANSACTION_NOT_COMMITTED");
     return { value, replayed: false };
   } catch (error) {
     await db
-      .prepare("DELETE FROM operation_idempotency WHERE id = ?")
+      .prepare(
+        "DELETE FROM operation_idempotency WHERE id = ? AND response_json IS NULL",
+      )
       .bind(id)
       .run();
     throw error;
+  } finally {
+    delete context.idempotencyReservationId;
   }
+}
+
+/** Durable response and domain writes share one SQLite transaction. An injected
+ * audit/ledger/response failure rolls the entire operation back. */
+export async function commitIdempotentOperation<T>(
+  context: OperationContext,
+  statements: D1PreparedStatement[],
+  response: T,
+): Promise<void> {
+  const db = getD1();
+  if (!context.idempotencyReservationId) {
+    await atomicBatch(db, statements);
+    return;
+  }
+  await atomicBatch(
+    db,
+    [
+      ...statements,
+      db
+        .prepare(
+          "UPDATE operation_idempotency SET response_json = ? WHERE id = ? AND response_json IS NULL",
+        )
+        .bind(JSON.stringify(response), context.idempotencyReservationId),
+    ],
+    [0, statements.length],
+  );
 }

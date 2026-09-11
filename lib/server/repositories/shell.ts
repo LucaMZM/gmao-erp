@@ -1,5 +1,6 @@
 import type { DemoUserSession } from "../auth";
-import { queryAll } from "./shared";
+import { tenantScope } from "./shared";
+import { scopedQueries } from "./scoped-queries";
 
 export type ShellNotification = {
   id: string;
@@ -12,10 +13,11 @@ export type ShellNotification = {
 export async function getShellNotifications(
   session: DemoUserSession,
 ): Promise<ShellNotification[]> {
+  const { queryAll } = scopedQueries(tenantScope(session));
   return queryAll<ShellNotification>(
     `
     SELECT id, title, body, severity, created_at AS createdAt
-    FROM notifications
+    FROM scope_notifications
     WHERE user_id = ?
       AND organization_id = ?
       AND site_id = ?

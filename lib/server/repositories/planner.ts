@@ -1,3 +1,4 @@
+import { scopedQueries } from "./scoped-queries";
 import {
   calculatePlannedCapacity,
   detectPlanningConflicts,
@@ -6,7 +7,6 @@ import {
   type WorkforceProfile,
 } from "@/lib/domain/planning";
 import type { TenantScope } from "./shared";
-import { queryAll } from "./shared";
 
 const OPEN_STATES =
   "('APPROVED','PLANNED','SCHEDULED','ASSIGNED','IN_PROGRESS','PAUSED','WAITING_PART','WAITING_VENDOR')";
@@ -176,6 +176,7 @@ export async function getPlannerData(
   currentUserId: string,
   requestedWeek?: string,
 ): Promise<PlannerData> {
+  const { queryAll } = scopedQueries(scope);
   const weekStart = normalizeWeekStart(requestedWeek);
   const weekEnd = addDays(weekStart, 7);
   const weekStartIso = `${weekStart}T00:00:00.000Z`;
@@ -280,10 +281,10 @@ export async function getPlannerData(
           (SELECT GROUP_CONCAT(requirement.certification_id)
             FROM work_order_certification_requirements requirement
             WHERE requirement.work_order_id = wo.id) AS certificationRequirements
-         FROM work_orders wo
-         INNER JOIN assets asset ON asset.id = wo.asset_id
+         FROM scope_work_orders wo
+         INNER JOIN scope_assets asset ON asset.id = wo.asset_id
          INNER JOIN functional_locations location ON location.id = wo.functional_location_id
-         LEFT JOIN maintenance_plans plan ON plan.id = wo.maintenance_plan_id
+         LEFT JOIN scope_maintenance_plans plan ON plan.id = wo.maintenance_plan_id
          LEFT JOIN work_order_assignments assignment ON assignment.id = (
            SELECT active_assignment.id FROM work_order_assignments active_assignment
            WHERE active_assignment.work_order_id = wo.id
@@ -310,10 +311,10 @@ export async function getPlannerData(
           (SELECT GROUP_CONCAT(requirement.certification_id)
             FROM work_order_certification_requirements requirement
             WHERE requirement.work_order_id = wo.id) AS certificationRequirements
-         FROM work_orders wo
-         INNER JOIN assets asset ON asset.id = wo.asset_id
+         FROM scope_work_orders wo
+         INNER JOIN scope_assets asset ON asset.id = wo.asset_id
          INNER JOIN functional_locations location ON location.id = wo.functional_location_id
-         LEFT JOIN maintenance_plans plan ON plan.id = wo.maintenance_plan_id
+         LEFT JOIN scope_maintenance_plans plan ON plan.id = wo.maintenance_plan_id
          LEFT JOIN work_order_assignments assignment ON assignment.id = (
            SELECT active_assignment.id FROM work_order_assignments active_assignment
            WHERE active_assignment.work_order_id = wo.id

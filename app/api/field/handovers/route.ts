@@ -2,7 +2,10 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { assertSameOrigin, requireApiSession } from "@/lib/server/auth";
 import { apiErrorResponse, readJsonBody } from "@/lib/server/http";
-import { createShiftHandover } from "@/lib/server/operations/field";
+import {
+  createShiftHandover,
+  authorizeHandover,
+} from "@/lib/server/operations/field";
 import { runIdempotent } from "@/lib/server/operations/shared";
 
 const schema = z.object({
@@ -34,11 +37,13 @@ export async function POST(request: Request) {
       );
     }
     const context = { session, requestId };
+    await authorizeHandover(context, parsed.data);
     const { value: data, replayed } = await runIdempotent(
       context,
       request.headers.get("idempotency-key"),
       "SHIFT_HANDOVER_CREATE",
       () => createShiftHandover(context, parsed.data),
+      parsed.data,
     );
     return NextResponse.json(
       { data, replayed, requestId },

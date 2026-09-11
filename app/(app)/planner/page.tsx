@@ -1,3 +1,4 @@
+import { tenantScope } from "@/lib/server/repositories/shared";
 import {
   ArrowLeft,
   ArrowRight,
@@ -33,10 +34,7 @@ export default async function PlannerPage({
   const session = await requireDemoSession();
   if (!hasPermission(session.permissionCodes, "planning.manage"))
     redirect("/overview");
-  const scope = {
-    organizationId: session.organizationId,
-    siteId: session.siteId,
-  };
+  const scope = tenantScope(session);
   const [data, activeField] = await Promise.all([
     getPlannerData(scope, session.userId, requestedWeek),
     getActiveFieldTechnicians(scope),

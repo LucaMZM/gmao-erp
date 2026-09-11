@@ -1,3 +1,4 @@
+import { tenantScope } from "@/lib/server/repositories/shared";
 import {
   ArrowLeft,
   CalendarClock,
@@ -35,10 +36,7 @@ export default async function MaintenancePlanDetailPage({
   if (!hasPermission(session.permissionCodes, "preventive.manage"))
     redirect("/overview");
   const code = decodeURIComponent((await params).code);
-  const data = await getMaintenancePlanDetail(
-    { organizationId: session.organizationId, siteId: session.siteId },
-    code,
-  );
+  const data = await getMaintenancePlanDetail(tenantScope(session), code);
   if (!data) notFound();
   const plan = data.plan;
   const now = new Date().toISOString();

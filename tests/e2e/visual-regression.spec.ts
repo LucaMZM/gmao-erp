@@ -1,5 +1,21 @@
 import { expect, test, type Page } from "@playwright/test";
 
+const runtimeErrors = new WeakMap<Page, string[]>();
+test.beforeEach(async ({ page }) => {
+  const errors: string[] = [];
+  runtimeErrors.set(page, errors);
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+});
+test.afterEach(async ({ page }) => {
+  expect(
+    runtimeErrors.get(page),
+    "Browser console/runtime must remain clean",
+  ).toEqual([]);
+});
+
 async function login(page: Page, email: string) {
   const response = await page.request.post("/api/auth/login", {
     data: { email, password: "Mazmi2026!" },

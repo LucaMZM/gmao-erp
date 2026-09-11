@@ -11,8 +11,15 @@ export type CostByAssetExportRow = {
 export function reportingCsv(data: {
   costsByAsset: readonly CostByAssetExportRow[];
 }): string {
-  const escape = (value: unknown) =>
-    `"${String(value ?? "").replaceAll('"', '""')}"`;
+  const escape = (value: unknown) => {
+    const text = String(value ?? "");
+    // Quoting alone does not stop spreadsheet formula evaluation.
+    const safe =
+      /^[\s\uFEFF]*[=+@-]/.test(text) || /^[\t\r\n]/.test(text)
+        ? `'${text}`
+        : text;
+    return `"${safe.replaceAll('"', '""')}"`;
+  };
   const rows = [
     [
       "Activo",

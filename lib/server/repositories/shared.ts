@@ -1,6 +1,7 @@
 import { getD1 } from "@/db";
 import { ensureDatabase } from "../database";
 import type { DemoUserSession } from "../auth";
+import type { EnterprisePermission } from "@/lib/domain/governance";
 
 export type SqlValue = string | number | null;
 export type TenantScope = {
@@ -8,10 +9,11 @@ export type TenantScope = {
   siteId: string;
   userId?: string;
   roleKey?: string;
-  fullAreaAccess?: boolean;
-  areaIds?: string[];
-  fullWarehouseAccess?: boolean;
-  warehouseIds?: string[];
+  permissionCodes?: readonly EnterprisePermission[];
+  fullAreaAccess: boolean;
+  areaIds: string[];
+  fullWarehouseAccess: boolean;
+  warehouseIds: string[];
 };
 
 export function tenantScope(session: DemoUserSession): TenantScope {
@@ -20,6 +22,7 @@ export function tenantScope(session: DemoUserSession): TenantScope {
     siteId: session.siteId,
     userId: session.userId,
     roleKey: session.roleKey,
+    permissionCodes: session.permissionCodes,
     fullAreaAccess: session.fullAreaAccess,
     areaIds: session.areaIds,
     fullWarehouseAccess: session.fullWarehouseAccess,
@@ -31,7 +34,7 @@ export function warehouseScopePredicate(
   scope: TenantScope,
   warehouseExpression: string,
 ): { sql: string; params: SqlValue[] } {
-  if (scope.fullWarehouseAccess !== false) return { sql: "1 = 1", params: [] };
+  if (scope.fullWarehouseAccess === true) return { sql: "1 = 1", params: [] };
   const ids = scope.warehouseIds ?? [];
   if (!ids.length) return { sql: "1 = 0", params: [] };
   return {
@@ -44,7 +47,7 @@ export function locationScopePredicate(
   scope: TenantScope,
   locationExpression: string,
 ): { sql: string; params: SqlValue[] } {
-  if (scope.fullAreaAccess !== false) return { sql: "1 = 1", params: [] };
+  if (scope.fullAreaAccess === true) return { sql: "1 = 1", params: [] };
   const ids = scope.areaIds ?? [];
   if (!ids.length) return { sql: "1 = 0", params: [] };
   return {

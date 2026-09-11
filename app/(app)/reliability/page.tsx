@@ -1,3 +1,4 @@
+import { tenantScope } from "@/lib/server/repositories/shared";
 import {
   Activity,
   ArrowDownRight,
@@ -89,10 +90,7 @@ export default async function ReliabilityPage({
   const session = await requireDemoSession();
   if (!hasPermission(session.permissionCodes, "reliability.rca.manage"))
     redirect("/overview");
-  const data = await getReliabilityCenter({
-    organizationId: session.organizationId,
-    siteId: session.siteId,
-  });
+  const data = await getReliabilityCenter(tenantScope(session));
   const actors = sortedActors(data.badActors, sort).slice(0, 10);
   const paretoRows =
     pareto === "area"

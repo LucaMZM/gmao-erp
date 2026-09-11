@@ -12,6 +12,8 @@ import {
   Wrench,
 } from "lucide-react";
 import Link from "next/link";
+import { redirect } from "next/navigation";
+import { hasPermission } from "@/lib/domain/governance";
 import type { ReactNode } from "react";
 import { FieldQuickActions } from "@/components/field/field-quick-actions";
 import { StatusBadge } from "@/components/ui/status-badge";
@@ -124,6 +126,8 @@ function WorkSection({
 
 export default async function MyWorkPage() {
   const session = await requireDemoSession();
+  if (!hasPermission(session.permissionCodes, "workorder.execute"))
+    redirect("/overview");
   const scope = tenantScope(session);
   const [data, options] = await Promise.all([
     getMyWork(scope, session.userId),

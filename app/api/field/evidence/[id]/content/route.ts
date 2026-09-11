@@ -1,4 +1,5 @@
 import { getD1 } from "@/db";
+import { hasPermission } from "@/lib/domain/governance";
 import { getCurrentSession } from "@/lib/server/auth";
 import { ensureDatabase } from "@/lib/server/database";
 import { getEvidenceStorage } from "@/lib/server/file-storage";
@@ -13,6 +14,8 @@ export async function GET(
 ) {
   const session = await getCurrentSession();
   if (!session) return new Response("Unauthorized", { status: 401 });
+  if (!hasPermission(session.permissionCodes, "workorder.execute"))
+    return new Response("Forbidden", { status: 403 });
   await ensureDatabase();
   const { id } = await params;
   const locationScope = locationScopePredicate(
@@ -58,7 +61,7 @@ export async function GET(
       "Content-Type": evidence.contentType ?? object.contentType,
       "Content-Length": String(object.size),
       "Content-Disposition": `inline; filename="${fileName}"`,
-      "Cache-Control": "private, max-age=300",
+      "Cache-Control": "private, no-store",
       "X-Content-Type-Options": "nosniff",
     },
   });

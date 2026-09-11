@@ -1,6 +1,7 @@
+import { scopedQueries } from "./scoped-queries";
 import { calculatePmCompliance } from "@/lib/domain/preventive";
 import type { SqlValue, TenantScope } from "./shared";
-import { normalizeQuery, queryAll, queryFirst } from "./shared";
+import { normalizeQuery } from "./shared";
 
 export type MaintenancePlanListItem = {
   id: string;
@@ -73,12 +74,13 @@ export type MaintenancePlanListData = {
 export async function getPreventiveCatalog(
   scope: TenantScope,
 ): Promise<PreventiveCatalog> {
+  const { queryAll } = scopedQueries(scope);
   const [assets, owners, meters, skills, certifications, parts] =
     await Promise.all([
       queryAll<PreventiveCatalog["assets"][number]>(
         `SELECT asset.id, asset.code, asset.name, asset.criticality,
           asset.functional_location_id AS locationId, location.name AS locationName
-         FROM assets asset
+         FROM scope_assets asset
          INNER JOIN functional_locations location ON location.id = asset.functional_location_id
          WHERE asset.organization_id = ? AND asset.site_id = ? AND asset.status <> 'RETIRED'
          ORDER BY asset.code`,
@@ -96,7 +98,7 @@ export async function getPreventiveCatalog(
       ),
       queryAll<PreventiveCatalog["meters"][number]>(
         `SELECT id, asset_id AS assetId, code, name, unit, last_value AS lastValue
-         FROM meters
+         FROM scope_meters
          WHERE organization_id = ? AND site_id = ? AND status = 'ACTIVE'
          ORDER BY code`,
         [scope.organizationId, scope.siteId],
@@ -116,7 +118,7 @@ export async function getPreventiveCatalog(
           COALESCE(SUM(stock.on_hand - stock.reserved), 0) AS available
          FROM parts part
          INNER JOIN part_site_policies policy ON policy.part_id = part.id AND policy.site_id = ?
-         LEFT JOIN stock_levels stock ON stock.part_id = part.id AND stock.site_id = ?
+         LEFT JOIN scope_stock_levels stock ON stock.part_id = part.id AND stock.site_id = ?
          WHERE part.organization_id = ? AND part.status = 'ACTIVE'
          GROUP BY part.id, part.sku, part.name, part.unit
          ORDER BY part.sku LIMIT 300`,
@@ -133,6 +135,7 @@ export async function listMaintenancePlans(
     status?: string | string[];
   } = {},
 ): Promise<MaintenancePlanListData> {
+  const { queryAll, queryFirst } = scopedQueries(scope);
   const query = normalizeQuery(filters.q);
   const status = normalizeQuery(filters.status, 20) || "all";
   const now = new Date().toISOString();
@@ -170,14 +173,14 @@ export async function listMaintenancePlans(
         plan.criticality, plan.priority, asset.code AS assetCode, asset.name AS assetName,
         location.name AS locationName, owner.full_name AS ownerName,
         meter.code AS meterCode, meter.unit AS meterUnit, meter.last_value AS meterValue,
-        (SELECT COUNT(*) FROM work_orders wo WHERE wo.maintenance_plan_id = plan.id) AS generatedCount,
-        (SELECT COUNT(*) FROM work_orders wo WHERE wo.maintenance_plan_id = plan.id
+        (SELECT COUNT(*) FROM scope_work_orders wo WHERE wo.maintenance_plan_id = plan.id) AS generatedCount,
+        (SELECT COUNT(*) FROM scope_work_orders wo WHERE wo.maintenance_plan_id = plan.id
           AND wo.status NOT IN ('COMPLETED','CLOSED','CANCELLED')) AS openGeneratedCount
-       FROM maintenance_plans plan
-       INNER JOIN assets asset ON asset.id = plan.asset_id
+       FROM scope_maintenance_plans plan
+       INNER JOIN scope_assets asset ON asset.id = plan.asset_id
        INNER JOIN functional_locations location ON location.id = plan.functional_location_id
        INNER JOIN users owner ON owner.id = plan.owner_id
-       LEFT JOIN meters meter ON meter.id = plan.meter_id
+       LEFT JOIN scope_meters meter ON meter.id = plan.meter_id
        WHERE ${conditions.join(" AND ")}
        ORDER BY CASE plan.status WHEN 'ACTIVE' THEN 0 ELSE 1 END,
          CASE WHEN plan.next_due_at <= ? THEN 0 ELSE 1 END,
@@ -196,15 +199,15 @@ export async function listMaintenancePlans(
           (meter.last_value IS NOT NULL AND plan.meter_threshold IS NOT NULL AND meter.last_value >= plan.meter_threshold)) THEN 1 ELSE 0 END) AS due,
         SUM(CASE WHEN plan.status = 'ACTIVE' AND plan.next_due_at > ? AND plan.next_due_at <= ? THEN 1 ELSE 0 END) AS upcoming,
         SUM(CASE WHEN plan.status = 'INACTIVE' THEN 1 ELSE 0 END) AS inactive
-       FROM maintenance_plans plan
-       LEFT JOIN meters meter ON meter.id = plan.meter_id
+       FROM scope_maintenance_plans plan
+       LEFT JOIN scope_meters meter ON meter.id = plan.meter_id
        WHERE plan.organization_id = ? AND plan.site_id = ?`,
       [now, now, upcoming, scope.organizationId, scope.siteId],
     ),
     queryAll<{ dueAt: string; completedAt: string | null; status: string }>(
       `SELECT COALESCE(preventive_due_at, due_at) AS dueAt,
         completed_at AS completedAt, status
-       FROM work_orders
+       FROM scope_work_orders
        WHERE organization_id = ? AND site_id = ?
          AND maintenance_plan_id IS NOT NULL
          AND COALESCE(preventive_due_at, due_at) IS NOT NULL`,
@@ -289,6 +292,7 @@ export async function getMaintenancePlanDetail(
   scope: TenantScope,
   code: string,
 ): Promise<MaintenancePlanDetailData | null> {
+  const { queryAll, queryFirst } = scopedQueries(scope);
   const plan = await queryFirst<MaintenancePlanDetailData["plan"]>(
     `SELECT plan.id, plan.code, plan.title, plan.description, plan.status,
       plan.asset_id AS assetId, plan.functional_location_id AS locationId,
@@ -305,14 +309,14 @@ export async function getMaintenancePlanDetail(
       asset.code AS assetCode, asset.name AS assetName,
       location.name AS locationName, owner.full_name AS ownerName,
       meter.code AS meterCode, meter.unit AS meterUnit, meter.last_value AS meterValue,
-      (SELECT COUNT(*) FROM work_orders wo WHERE wo.maintenance_plan_id = plan.id) AS generatedCount,
-      (SELECT COUNT(*) FROM work_orders wo WHERE wo.maintenance_plan_id = plan.id
+      (SELECT COUNT(*) FROM scope_work_orders wo WHERE wo.maintenance_plan_id = plan.id) AS generatedCount,
+      (SELECT COUNT(*) FROM scope_work_orders wo WHERE wo.maintenance_plan_id = plan.id
         AND wo.status NOT IN ('COMPLETED','CLOSED','CANCELLED')) AS openGeneratedCount
-     FROM maintenance_plans plan
-     INNER JOIN assets asset ON asset.id = plan.asset_id
+     FROM scope_maintenance_plans plan
+     INNER JOIN scope_assets asset ON asset.id = plan.asset_id
      INNER JOIN functional_locations location ON location.id = plan.functional_location_id
      INNER JOIN users owner ON owner.id = plan.owner_id
-     LEFT JOIN meters meter ON meter.id = plan.meter_id
+     LEFT JOIN scope_meters meter ON meter.id = plan.meter_id
      WHERE plan.organization_id = ? AND plan.site_id = ? AND plan.code = ? LIMIT 1`,
     [scope.organizationId, scope.siteId, code],
   );
@@ -351,7 +355,7 @@ export async function getMaintenancePlanDetail(
           COALESCE(SUM(stock.on_hand - stock.reserved), 0) AS available
          FROM maintenance_plan_materials material
          INNER JOIN parts part ON part.id = material.part_id
-         LEFT JOIN stock_levels stock ON stock.part_id = part.id AND stock.site_id = ?
+         LEFT JOIN scope_stock_levels stock ON stock.part_id = part.id AND stock.site_id = ?
          WHERE material.maintenance_plan_id = ?
          GROUP BY material.id, part.id, part.sku, part.name, part.unit, material.quantity
          ORDER BY part.sku`,
@@ -375,7 +379,7 @@ export async function getMaintenancePlanDetail(
             INNER JOIN users user ON user.id = assignment.user_id
             WHERE assignment.work_order_id = wo.id AND assignment.unassigned_at IS NULL
             ORDER BY assignment.assigned_at LIMIT 1) AS assigneeName
-         FROM work_orders wo WHERE wo.maintenance_plan_id = ?
+         FROM scope_work_orders wo WHERE wo.maintenance_plan_id = ?
          ORDER BY COALESCE(wo.preventive_due_at, wo.due_at) DESC LIMIT 20`,
       [plan.id],
     ),

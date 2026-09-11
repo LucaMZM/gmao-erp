@@ -5,6 +5,8 @@ import {
 } from "@/lib/domain/production-calendar";
 import type { DemoUserSession } from "@/lib/server/auth";
 import { queryAll, queryFirst } from "./shared";
+import { tenantScope } from "./shared";
+import { scopedQueries } from "./scoped-queries";
 
 export async function getProductionExposure(
   siteId: string,
@@ -204,6 +206,7 @@ export async function getAuditEntries(
   session: DemoUserSession,
   filters: AuditFilters,
 ) {
+  const auditQuery = scopedQueries(tenantScope(session)).queryAll;
   const clauses = ["audit.organization_id = ?", "audit.site_id = ?"];
   const params: Array<string | number | null> = [
     session.organizationId,
@@ -233,7 +236,7 @@ export async function getAuditEntries(
     clauses.push("audit.created_at <= ?");
     params.push(`${filters.to}T23:59:59.999Z`);
   }
-  return queryAll<{
+  return auditQuery<{
     id: string;
     actorName: string;
     action: string;
@@ -252,7 +255,7 @@ export async function getAuditEntries(
       audit.previous_value AS previousValue, audit.new_value AS newValue,
       audit.context_json AS contextJson, audit.outcome, audit.error_code AS errorCode,
       audit.request_id AS requestId, audit.created_at AS createdAt
-     FROM audit_entries audit LEFT JOIN users user ON user.id = audit.actor_id
+     FROM scope_audit_entries audit LEFT JOIN users user ON user.id = audit.actor_id
      WHERE ${clauses.join(" AND ")}
      ORDER BY audit.created_at DESC LIMIT 200`,
     params,

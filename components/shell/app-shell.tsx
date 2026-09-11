@@ -162,7 +162,7 @@ export function AppShell({
       (item.alternatePermission &&
         hasPermission(session.permissionCodes, item.alternatePermission)),
   );
-  const mobileNavigation =
+  const mobileNavigation = (
     session.roleKey === "TECHNICIAN"
       ? [
           navigation.find((item) => item.href === "/my-work")!,
@@ -176,7 +176,13 @@ export function AppShell({
           navigation.find((item) => item.href === "/work-orders")!,
           navigation.find((item) => item.href === "/inventory")!,
         ]
-      : defaultMobileNavigation;
+      : defaultMobileNavigation
+  ).filter(
+    (item) =>
+      !("permission" in item) ||
+      !item.permission ||
+      hasPermission(session.permissionCodes, item.permission),
+  );
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -235,7 +241,12 @@ export function AppShell({
   };
 
   return (
-    <div className="app-frame">
+    <div
+      className="app-frame"
+      data-offline-user={session.userId}
+      data-offline-site={session.siteId}
+      data-offline-org={session.organizationId}
+    >
       <a className="skip-link" href="#main-content">
         Saltar al contenido
       </a>

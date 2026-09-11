@@ -45,3 +45,7 @@ Las páginas consumen repositorios server-side; los componentes interactivos sol
 - La cola offline usa IndexedDB y claves idempotentes solo para incidencias, notas, checklist, mediciones y relevos. Stock, lifecycle, cierre y otras mutaciones críticas permanecen online-only.
 - El calendario productivo aporta el denominador de disponibilidad. La exposición de planta se agrega por unidad productiva activa; los costes de labor se congelan al cerrar cada sesión.
 - Reporting y Audit se resuelven server-side con filtros scoped. Data Integrity detecta desviaciones y ofrece guía, pero nunca repara silenciosamente.
+
+## Hardening de auditoría independiente
+
+La revisión RC añade relaciones SQL scoped antes de agregación/paginación, autorización de lecturas y replay contra permisos vigentes, ownership persistido de cola offline y aserciones CAS dentro del batch D1. La migración aditiva 0010 refuerza atomicidad e invariantes sin cambiar arquitectura. Evidencia, regresiones, ventanas de métricas y límites conocidos: [auditoría independiente](independent-audit.md).

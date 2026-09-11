@@ -8,6 +8,7 @@ import procurementMigration from "@/drizzle/0006_peaceful_reptil.sql?raw";
 import fieldOperationsMigration from "@/drizzle/0007_luxuriant_ender_wiggin.sql?raw";
 import enterpriseGovernanceMigration from "@/drizzle/0008_enterprise_governance.sql?raw";
 import enterpriseAuditGuardrailsMigration from "@/drizzle/0009_enterprise_audit_guardrails.sql?raw";
+import atomicMutationAssertionsMigration from "@/drizzle/0010_atomic_mutation_assertions.sql?raw";
 import { getD1 } from "@/db";
 import { seedDemoDatabase } from "@/db/seed";
 import { seedV1BDatabase } from "@/db/seed-v1b";
@@ -29,6 +30,10 @@ const MIGRATIONS = [
   {
     id: "0009_enterprise_audit_guardrails",
     sql: enterpriseAuditGuardrailsMigration,
+  },
+  {
+    id: "0010_atomic_mutation_assertions",
+    sql: atomicMutationAssertionsMigration,
   },
 ] as const;
 const SCHEMA_VERSION = MIGRATIONS.at(-1)!.id;
@@ -62,6 +67,19 @@ async function initialize(): Promise<void> {
       .first<{ id: string }>();
     if (applied) continue;
 
+    if (migration.id === "0010_atomic_mutation_assertions") {
+      const incompatible = await db
+        .prepare(
+          `SELECT 'LABOR' AS domain, user_id AS entity, COUNT(*) AS count FROM labor_sessions WHERE ended_at IS NULL GROUP BY user_id HAVING COUNT(*) > 1
+        UNION ALL SELECT 'DOWNTIME', work_order_id, COUNT(*) FROM downtime_events WHERE ended_at IS NULL AND work_order_id IS NOT NULL GROUP BY work_order_id HAVING COUNT(*) > 1`,
+        )
+        .all();
+      if (incompatible.results.length)
+        throw new Error(
+          `MIGRATION_0010_PREFLIGHT_FAILED: ${JSON.stringify(incompatible.results)}`,
+        );
+    }
+
     const statements = migration.sql
       .split("--> statement-breakpoint")
       .map((statement) => statement.trim())
@@ -83,11 +101,6 @@ async function initialize(): Promise<void> {
 }
 
 async function adoptHostedSchema(db: ReturnType<typeof getD1>): Promise<void> {
-  const applied = await db
-    .prepare("SELECT COUNT(*) AS count FROM _mazmi_migrations")
-    .first<{ count: number }>();
-  if (Number(applied?.count ?? 0) > 0) return;
-
   // Sites applies packaged D1 migrations before the Worker starts. Its migration
   // ledger is separate from Mazmi's, so a freshly hosted database can contain the
   // complete schema while `_mazmi_migrations` is still empty. Adopt only an exact
@@ -133,9 +146,48 @@ async function adoptHostedSchema(db: ReturnType<typeof getD1>): Promise<void> {
 
   if (!hasCompleteHostedSchema) return;
 
+  // On an upgrade Sites can apply 0010 before the application sees it, while
+  // Mazmi's ledger still ends at 0009. Never claim an absent schema delta.
+  const guards = await db
+    .prepare(
+      `SELECT name,sql FROM sqlite_master WHERE name IN ('_mutation_assertions','uq_labor_one_active_user','uq_downtime_one_active_order','trg_work_order_finalization_guard','trg_material_final_order_guard','trg_downtime_final_order_guard')`,
+    )
+    .all<{ name: string; sql: string }>();
+  if (guards.results.length > 0 && guards.results.length !== 6)
+    throw new Error("MIGRATION_0010_PARTIAL_HOSTED_SCHEMA");
+  const hasAtomicGuards = guards.results.length === 6;
+  const normalizeGuard = (sql: string) =>
+    sql
+      .replace(/--[^\n]*/g, "")
+      .replaceAll("`", "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/;$/, "");
+  if (hasAtomicGuards) {
+    const expected = atomicMutationAssertionsMigration
+      .split("--> statement-breakpoint")
+      .map(normalizeGuard);
+    for (const guard of guards.results) {
+      if (!expected.includes(normalizeGuard(guard.sql)))
+        throw new Error(`MIGRATION_0010_SCHEMA_MISMATCH: ${guard.name}`);
+    }
+  } else if (
+    await db
+      .prepare(
+        "SELECT id FROM _mazmi_migrations WHERE id='0010_atomic_mutation_assertions'",
+      )
+      .first()
+  ) {
+    throw new Error(
+      "MIGRATION_0010_SCHEMA_MISMATCH: ledger claims missing guards",
+    );
+  }
+
   const appliedAt = new Date().toISOString();
   await db.batch(
-    MIGRATIONS.map((migration) =>
+    MIGRATIONS.filter(
+      (migration) => hasAtomicGuards || migration.id < "0010",
+    ).map((migration) =>
       db
         .prepare(
           "INSERT OR IGNORE INTO _mazmi_migrations (id, applied_at) VALUES (?, ?)",

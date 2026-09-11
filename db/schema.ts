@@ -1463,6 +1463,9 @@ export const laborSessions = sqliteTable(
   (table) => [
     index("idx_labor_work_order").on(table.workOrderId),
     index("idx_labor_user_active").on(table.userId, table.endedAt),
+    uniqueIndex("uq_labor_one_active_user")
+      .on(table.userId)
+      .where(sql`${table.endedAt} is null`),
     check("ck_labor_minutes", sql`${table.minutes} >= 0`),
     check(
       "ck_labor_status",
@@ -1512,6 +1515,11 @@ export const downtimeEvents = sqliteTable(
   (table) => [
     index("idx_downtime_site_started").on(table.siteId, table.startedAt),
     index("idx_downtime_asset_started").on(table.assetId, table.startedAt),
+    uniqueIndex("uq_downtime_one_active_order")
+      .on(table.workOrderId)
+      .where(
+        sql`${table.endedAt} is null and ${table.workOrderId} is not null`,
+      ),
     check("ck_downtime_duration", sql`${table.durationMinutes} >= 0`),
   ],
 );
@@ -2801,6 +2809,17 @@ export const evidenceItems = sqliteTable(
 );
 
 export type Asset = typeof assets.$inferSelect;
+// Empty by design: failed CAS assertions violate this constraint and roll back
+// the entire D1 batch. Never use this table as application state.
+export const mutationAssertions = sqliteTable(
+  "_mutation_assertions",
+  {
+    affectedRows: integer("affected_rows").notNull(),
+  },
+  (table) => [
+    check("ck_atomic_mutation_applied", sql`${table.affectedRows} = 1`),
+  ],
+);
 export type WorkOrder = typeof workOrders.$inferSelect;
 export type Incident = typeof incidents.$inferSelect;
 export type Part = typeof parts.$inferSelect;

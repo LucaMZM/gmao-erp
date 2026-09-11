@@ -1,3 +1,4 @@
+import { tenantScope } from "@/lib/server/repositories/shared";
 import type { Metadata } from "next";
 import {
   ArrowLeft,
@@ -37,7 +38,7 @@ export async function generateMetadata({
   const data =
     session && hasPermission(session.permissionCodes, "reliability.rca.manage")
       ? await getRootCauseAnalysis(
-          { organizationId: session.organizationId, siteId: session.siteId },
+          tenantScope(session),
           decodeURIComponent(number),
         )
       : null;
@@ -57,7 +58,7 @@ export default async function RootCauseAnalysisPage({
     redirect("/overview");
   const { number } = await params;
   const data = await getRootCauseAnalysis(
-    { organizationId: session.organizationId, siteId: session.siteId },
+    tenantScope(session),
     decodeURIComponent(number),
   );
   if (!data) notFound();

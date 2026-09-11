@@ -1,6 +1,7 @@
+import { scopedQueries } from "./scoped-queries";
 import { normalizeScanCode } from "@/lib/domain/field";
 import type { TenantScope } from "./shared";
-import { locationScopePredicate, queryAll, queryFirst } from "./shared";
+import { locationScopePredicate } from "./shared";
 import { getWorkOrderDetail, type WorkOrderDetailData } from "./work-orders";
 
 const FIELD_OPEN_STATES =
@@ -58,6 +59,7 @@ export async function getMyWork(
   scope: TenantScope,
   userId: string,
 ): Promise<MyWorkData> {
+  const { queryAll, queryFirst } = scopedQueries(scope);
   const now = new Date().toISOString();
   const today = now.slice(0, 10);
   const nextWeek = new Date(new Date(now).getTime() + 7 * 86_400_000)
@@ -82,8 +84,8 @@ export async function getMyWork(
           AND task.response_status IN ('COMPLETED','PASS')) AS completedTasks,
       work_order.safety_level AS safetyLevel,
       work_order.isolation_required AS isolationRequired
-    FROM work_orders work_order
-    INNER JOIN assets asset ON asset.id = work_order.asset_id
+    FROM scope_work_orders work_order
+    INNER JOIN scope_assets asset ON asset.id = work_order.asset_id
     INNER JOIN functional_locations location
       ON location.id = work_order.functional_location_id
     INNER JOIN work_order_assignments assignment
@@ -153,10 +155,10 @@ export async function getMyWork(
           handover.parts_pending AS partsPending, handover.created_at AS createdAt,
           author.full_name AS authorName,
           GROUP_CONCAT(work_order.number, ', ') AS workOrders
-         FROM shift_handovers handover
+         FROM scope_shift_handovers handover
          INNER JOIN users author ON author.id = handover.author_id
          LEFT JOIN shift_handover_work_orders link ON link.handover_id = handover.id
-         LEFT JOIN work_orders work_order ON work_order.id = link.work_order_id
+         LEFT JOIN scope_work_orders work_order ON work_order.id = link.work_order_id
          WHERE handover.organization_id = ? AND handover.site_id = ?
            AND handover.to_shift = COALESCE((SELECT shift_code FROM workforce_profiles
              WHERE user_id = ? AND site_id = ? LIMIT 1), handover.to_shift)
@@ -208,6 +210,7 @@ export async function getAssetByScanCode(
   scope: TenantScope,
   value: string,
 ): Promise<ScannedAsset | null> {
+  const { queryAll, queryFirst } = scopedQueries(scope);
   const scanCode = normalizeScanCode(value);
   const locationScope = locationScopePredicate(
     scope,
@@ -218,12 +221,12 @@ export async function getAssetByScanCode(
       asset.status, asset.criticality, asset.health_score AS healthScore,
       location.id AS locationId,
       location.code AS locationCode, location.name AS locationName,
-      (SELECT COUNT(*) FROM incidents incident WHERE incident.asset_id = asset.id
+      (SELECT COUNT(*) FROM scope_incidents incident WHERE incident.asset_id = asset.id
         AND incident.site_id = ? AND incident.status IN ('NEW','TRIAGE','ACCEPTED')) AS openIncidents,
-      (SELECT COUNT(*) FROM work_orders work_order WHERE work_order.asset_id = asset.id
+      (SELECT COUNT(*) FROM scope_work_orders work_order WHERE work_order.asset_id = asset.id
         AND work_order.site_id = ? AND work_order.status IN ${FIELD_OPEN_STATES}) AS activeWorkOrders,
       asset.next_pm_at AS nextPmAt
-     FROM assets asset
+     FROM scope_assets asset
      INNER JOIN functional_locations location
        ON location.id = asset.functional_location_id
      WHERE asset.organization_id = ? AND asset.site_id = ?
@@ -248,14 +251,14 @@ export async function getAssetByScanCode(
      INNER JOIN parts part ON part.id = compatibility.part_id
      INNER JOIN part_site_policies policy ON policy.part_id = part.id
        AND policy.site_id = ? AND policy.critical = 1
-     LEFT JOIN stock_levels stock ON stock.part_id = part.id AND stock.site_id = ?
+     LEFT JOIN scope_stock_levels stock ON stock.part_id = part.id AND stock.site_id = ?
      WHERE compatibility.asset_id = ?
      GROUP BY part.id ORDER BY available ASC, part.sku LIMIT 4`,
       [scope.siteId, scope.siteId, asset.id],
     ),
     queryAll<ScannedAsset["recentWorkOrders"][number]>(
       `SELECT number, title, status, requested_at AS requestedAt
-       FROM work_orders WHERE organization_id = ? AND site_id = ?
+       FROM scope_work_orders WHERE organization_id = ? AND site_id = ?
          AND asset_id = ? ORDER BY requested_at DESC LIMIT 5`,
       [scope.organizationId, scope.siteId, asset.id],
     ),
@@ -302,6 +305,7 @@ export async function getFieldWorkOrder(
   roleKey: string,
   number: string,
 ): Promise<FieldWorkOrderData | null> {
+  const { queryAll, queryFirst } = scopedQueries(scope);
   const detail = await getWorkOrderDetail(scope, number);
   if (!detail) return null;
   if (roleKey === "TECHNICIAN") {
@@ -342,7 +346,7 @@ export async function getFieldWorkOrder(
       ),
       queryAll<FieldWorkOrderData["availableMeters"][number]>(
         `SELECT id, code, name, unit, reading_type AS readingType,
-          last_value AS lastValue FROM meters
+          last_value AS lastValue FROM scope_meters
          WHERE asset_id = ? AND organization_id = ? AND site_id = ?
            AND status = 'ACTIVE' ORDER BY code`,
         [detail.order.assetId, scope.organizationId, scope.siteId],
@@ -358,6 +362,7 @@ export async function getFieldWorkOrder(
 }
 
 export async function getActiveFieldTechnicians(scope: TenantScope) {
+  const { queryAll } = scopedQueries(scope);
   return queryAll<{
     userId: string;
     fullName: string;
@@ -379,7 +384,7 @@ export async function getActiveFieldTechnicians(scope: TenantScope) {
           AND task.response_status IN ('COMPLETED','PASS')) AS completedTasks
      FROM labor_sessions labor
      INNER JOIN users user ON user.id = labor.user_id
-     INNER JOIN work_orders work_order ON work_order.id = labor.work_order_id
+     INNER JOIN scope_work_orders work_order ON work_order.id = labor.work_order_id
      WHERE work_order.organization_id = ? AND work_order.site_id = ?
        AND labor.ended_at IS NULL
      ORDER BY labor.started_at`,

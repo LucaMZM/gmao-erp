@@ -9,6 +9,8 @@ import type { DemoUserSession } from "@/lib/server/auth";
 import { ensureDatabase } from "@/lib/server/database";
 import { ApiContractError } from "@/lib/server/http";
 import {
+  atomicBatch,
+  commitIdempotentOperation,
   assertMutationApplied,
   assertLocationScope,
   jsonValue,
@@ -65,7 +67,7 @@ async function findIncident(
   return row;
 }
 
-async function resolveContext(
+export async function resolveIncidentContext(
   session: DemoUserSession,
   functionalLocationId: string,
   assetId: string | null,
@@ -124,7 +126,7 @@ export async function reportIncident(
 ): Promise<{ id: string; number: string }> {
   assertPermission(context.session, "INCIDENT_REPORT");
   const now = operationNow(context);
-  const resolved = await resolveContext(
+  const resolved = await resolveIncidentContext(
     context.session,
     input.functionalLocationId,
     input.assetId,
@@ -135,60 +137,62 @@ export async function reportIncident(
   const auditId = operationId("audit");
   const notificationPrefix = operationId("notification");
   const db = getD1();
-  await db.batch([
-    db
-      .prepare(
-        `INSERT INTO incidents (
+  await commitIdempotentOperation(
+    context,
+    [
+      db
+        .prepare(
+          `INSERT INTO incidents (
           id, organization_id, site_id, functional_location_id, asset_id,
           reported_by_id, number, title, description, severity, initial_impact,
           status, origin, classification, triage_priority, reported_at,
           triaged_at, resolved_at, version, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEW', ?, NULL, NULL, ?, NULL, NULL, 1, ?, ?)`,
-      )
-      .bind(
-        id,
-        context.session.organizationId,
-        context.session.siteId,
-        resolved.functionalLocationId,
-        resolved.assetId,
-        context.session.userId,
-        number,
-        input.title,
-        input.description,
-        input.severity,
-        input.initialImpact,
-        input.origin,
-        now,
-        now,
-        now,
-      ),
-    db
-      .prepare(
-        `INSERT INTO incident_events
+        )
+        .bind(
+          id,
+          context.session.organizationId,
+          context.session.siteId,
+          resolved.functionalLocationId,
+          resolved.assetId,
+          context.session.userId,
+          number,
+          input.title,
+          input.description,
+          input.severity,
+          input.initialImpact,
+          input.origin,
+          now,
+          now,
+          now,
+        ),
+      db
+        .prepare(
+          `INSERT INTO incident_events
           (id, incident_id, actor_id, event_type, from_status, to_status, note, created_at)
          VALUES (?, ?, ?, 'INCIDENT_REPORTED', NULL, 'NEW', 'Incidencia registrada.', ?)`,
-      )
-      .bind(eventId, id, context.session.userId, now),
-    db
-      .prepare(
-        `INSERT INTO audit_entries
+        )
+        .bind(eventId, id, context.session.userId, now),
+      db
+        .prepare(
+          `INSERT INTO audit_entries
           (id, organization_id, site_id, actor_id, action, entity_type, entity_id,
            previous_value, new_value, request_id, created_at)
          VALUES (?, ?, ?, ?, 'INCIDENT_REPORTED', 'INCIDENT', ?, NULL, ?, ?, ?)`,
-      )
-      .bind(
-        auditId,
-        context.session.organizationId,
-        context.session.siteId,
-        context.session.userId,
-        id,
-        jsonValue({ number, severity: input.severity, status: "NEW" }),
-        context.requestId,
-        now,
-      ),
-    db
-      .prepare(
-        `INSERT INTO notifications
+        )
+        .bind(
+          auditId,
+          context.session.organizationId,
+          context.session.siteId,
+          context.session.userId,
+          id,
+          jsonValue({ number, severity: input.severity, status: "NEW" }),
+          context.requestId,
+          now,
+        ),
+      db
+        .prepare(
+          `INSERT INTO notifications
           (id, organization_id, site_id, user_id, title, body, severity,
            entity_type, entity_id, read_at, created_at)
          SELECT ? || '-' || user.id, ?, ?, user.id, ?, ?, ?, 'INCIDENT', ?, NULL, ?
@@ -198,20 +202,22 @@ export async function reportIncident(
            AND membership.status = 'ACTIVE'
            AND membership.role_key IN ('MAINTENANCE_MANAGER','SUPERVISOR')
            AND ? IN ('CRITICAL','HIGH')`,
-      )
-      .bind(
-        notificationPrefix,
-        context.session.organizationId,
-        context.session.siteId,
-        `Nueva incidencia ${input.severity === "CRITICAL" ? "crítica" : "prioritaria"}`,
-        `${number} · ${input.title}`,
-        input.severity === "CRITICAL" ? "CRITICAL" : "WARNING",
-        id,
-        now,
-        context.session.organizationId,
-        input.severity,
-      ),
-  ]);
+        )
+        .bind(
+          notificationPrefix,
+          context.session.organizationId,
+          context.session.siteId,
+          `Nueva incidencia ${input.severity === "CRITICAL" ? "crítica" : "prioritaria"}`,
+          `${number} · ${input.title}`,
+          input.severity === "CRITICAL" ? "CRITICAL" : "WARNING",
+          id,
+          now,
+          context.session.organizationId,
+          input.severity,
+        ),
+    ],
+    { id, number },
+  );
   return { id, number };
 }
 
@@ -260,7 +266,7 @@ export async function triageIncident(
     );
   }
   const resolved = input.assetId
-    ? await resolveContext(
+    ? await resolveIncidentContext(
         context.session,
         current.functionalLocationId,
         input.assetId,
@@ -284,10 +290,12 @@ export async function triageIncident(
   const noteId = operationId("incident-note");
   const auditId = operationId("audit");
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE incidents SET
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE incidents SET
           status = ?, asset_id = ?, functional_location_id = ?,
           triage_priority = COALESCE(?, triage_priority),
           classification = COALESCE(?, classification),
@@ -295,87 +303,89 @@ export async function triageIncident(
           resolved_at = CASE WHEN ? IN ('REJECTED','CLOSED') THEN ? ELSE resolved_at END,
           version = version + 1, updated_at = ?
          WHERE id = ? AND organization_id = ? AND site_id = ? AND status = ? AND version = ?`,
-      )
-      .bind(
-        nextStatus,
-        resolved.assetId,
-        resolved.functionalLocationId,
-        input.priority ?? null,
-        input.classification ?? null,
-        nextStatus,
-        now,
-        nextStatus,
-        now,
-        now,
-        current.id,
-        context.session.organizationId,
-        context.session.siteId,
-        current.status,
-        current.version,
-      ),
-    db
-      .prepare(
-        `INSERT INTO incident_events
+        )
+        .bind(
+          nextStatus,
+          resolved.assetId,
+          resolved.functionalLocationId,
+          input.priority ?? null,
+          input.classification ?? null,
+          nextStatus,
+          now,
+          nextStatus,
+          now,
+          now,
+          current.id,
+          context.session.organizationId,
+          context.session.siteId,
+          current.status,
+          current.version,
+        ),
+      db
+        .prepare(
+          `INSERT INTO incident_events
           (id, incident_id, actor_id, event_type, from_status, to_status, note, created_at)
          SELECT ?, id, ?, ?, ?, ?, ?, ? FROM incidents
          WHERE id = ? AND version = ?`,
-      )
-      .bind(
-        eventId,
-        context.session.userId,
-        input.action === "REQUEST_INFO"
-          ? "INFORMATION_REQUESTED"
-          : "TRIAGE_UPDATED",
-        current.status,
-        nextStatus,
-        input.note ?? "Triage actualizado.",
-        now,
-        current.id,
-        nextVersion,
-      ),
-    db
-      .prepare(
-        `INSERT INTO incident_notes (id, incident_id, actor_id, kind, body, created_at)
+        )
+        .bind(
+          eventId,
+          context.session.userId,
+          input.action === "REQUEST_INFO"
+            ? "INFORMATION_REQUESTED"
+            : "TRIAGE_UPDATED",
+          current.status,
+          nextStatus,
+          input.note ?? "Triage actualizado.",
+          now,
+          current.id,
+          nextVersion,
+        ),
+      db
+        .prepare(
+          `INSERT INTO incident_notes (id, incident_id, actor_id, kind, body, created_at)
          SELECT ?, id, ?, ?, ?, ? FROM incidents
          WHERE id = ? AND version = ? AND ? IS NOT NULL`,
-      )
-      .bind(
-        noteId,
-        context.session.userId,
-        noteKind,
-        input.note ?? "",
-        now,
-        current.id,
-        nextVersion,
-        input.note?.trim() ? input.note : null,
-      ),
-    db
-      .prepare(
-        `INSERT INTO audit_entries
+        )
+        .bind(
+          noteId,
+          context.session.userId,
+          noteKind,
+          input.note ?? "",
+          now,
+          current.id,
+          nextVersion,
+          input.note?.trim() ? input.note : null,
+        ),
+      db
+        .prepare(
+          `INSERT INTO audit_entries
           (id, organization_id, site_id, actor_id, action, entity_type, entity_id,
            previous_value, new_value, request_id, created_at)
          SELECT ?, ?, ?, ?, ?, 'INCIDENT', id, ?, ?, ?, ? FROM incidents
          WHERE id = ? AND version = ?`,
-      )
-      .bind(
-        auditId,
-        context.session.organizationId,
-        context.session.siteId,
-        context.session.userId,
-        `INCIDENT_${input.action}`,
-        jsonValue({ status: current.status, assetId: current.assetId }),
-        jsonValue({
-          status: nextStatus,
-          assetId: resolved.assetId,
-          priority: input.priority ?? current.priority,
-          classification: input.classification ?? current.classification,
-        }),
-        context.requestId,
-        now,
-        current.id,
-        nextVersion,
-      ),
-  ]);
+        )
+        .bind(
+          auditId,
+          context.session.organizationId,
+          context.session.siteId,
+          context.session.userId,
+          `INCIDENT_${input.action}`,
+          jsonValue({ status: current.status, assetId: current.assetId }),
+          jsonValue({
+            status: nextStatus,
+            assetId: resolved.assetId,
+            priority: input.priority ?? current.priority,
+            classification: input.classification ?? current.classification,
+          }),
+          context.requestId,
+          now,
+          current.id,
+          nextVersion,
+        ),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0]);
   return { status: nextStatus };
 }
@@ -410,25 +420,27 @@ export async function convertIncidentToWorkOrder(
   const workOrderId = operationId("wo");
   const nextVersion = incident.version + 1;
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE incidents SET status = 'CONVERTED', resolved_at = ?,
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE incidents SET status = 'CONVERTED', resolved_at = ?,
           version = version + 1, updated_at = ?
          WHERE id = ? AND organization_id = ? AND site_id = ?
            AND status = 'ACCEPTED' AND version = ?`,
-      )
-      .bind(
-        now,
-        now,
-        incident.id,
-        context.session.organizationId,
-        context.session.siteId,
-        incident.version,
-      ),
-    db
-      .prepare(
-        `INSERT INTO work_orders (
+        )
+        .bind(
+          now,
+          now,
+          incident.id,
+          context.session.organizationId,
+          context.session.siteId,
+          incident.version,
+        ),
+      db
+        .prepare(
+          `INSERT INTO work_orders (
           id, organization_id, site_id, asset_id, functional_location_id,
           requested_by_id, incident_id, number, title, description, status,
           priority, type, source, requested_at, due_at, planned_start,
@@ -447,110 +459,112 @@ export async function convertIncidentToWorkOrder(
             ELSE 'NONE' END,
           1, ?, ?
         FROM incidents WHERE id = ? AND version = ? AND status = 'CONVERTED'`,
-      )
-      .bind(
-        workOrderId,
-        number,
-        dueAtForPriority(incident.priority!, now),
-        now,
-        now,
-        incident.id,
-        nextVersion,
-      ),
-    ...[
-      [
-        "CREATED_FROM_INCIDENT",
-        null,
-        "REQUESTED",
-        "Orden creada desde incidencia.",
-      ],
-      [
-        "STATUS_CHANGED",
-        "REQUESTED",
-        "TRIAGE",
-        "Triage heredado de la incidencia.",
-      ],
-      [
-        "STATUS_CHANGED",
-        "TRIAGE",
-        "APPROVED",
-        "Incidencia aceptada y orden aprobada.",
-      ],
-    ].map(([eventType, fromStatus, toStatus, note], index) =>
-      db
-        .prepare(
-          `INSERT INTO work_order_events
-            (id, work_order_id, actor_id, event_type, from_status, to_status, note, created_at)
-           SELECT ?, id, ?, ?, ?, ?, ?, ? FROM work_orders WHERE id = ? AND incident_id = ?`,
         )
         .bind(
-          operationId(`wo-event-${index + 1}`),
-          context.session.userId,
-          eventType,
-          fromStatus,
-          toStatus,
-          note,
-          now,
           workOrderId,
+          number,
+          dueAtForPriority(incident.priority!, now),
+          now,
+          now,
           incident.id,
+          nextVersion,
         ),
-    ),
-    db
-      .prepare(
-        `INSERT INTO incident_events
+      ...[
+        [
+          "CREATED_FROM_INCIDENT",
+          null,
+          "REQUESTED",
+          "Orden creada desde incidencia.",
+        ],
+        [
+          "STATUS_CHANGED",
+          "REQUESTED",
+          "TRIAGE",
+          "Triage heredado de la incidencia.",
+        ],
+        [
+          "STATUS_CHANGED",
+          "TRIAGE",
+          "APPROVED",
+          "Incidencia aceptada y orden aprobada.",
+        ],
+      ].map(([eventType, fromStatus, toStatus, note], index) =>
+        db
+          .prepare(
+            `INSERT INTO work_order_events
+            (id, work_order_id, actor_id, event_type, from_status, to_status, note, created_at)
+           SELECT ?, id, ?, ?, ?, ?, ?, ? FROM work_orders WHERE id = ? AND incident_id = ?`,
+          )
+          .bind(
+            operationId(`wo-event-${index + 1}`),
+            context.session.userId,
+            eventType,
+            fromStatus,
+            toStatus,
+            note,
+            now,
+            workOrderId,
+            incident.id,
+          ),
+      ),
+      db
+        .prepare(
+          `INSERT INTO incident_events
           (id, incident_id, actor_id, event_type, from_status, to_status, note, created_at)
          SELECT ?, id, ?, 'INCIDENT_CONVERTED_TO_WORK_ORDER', 'ACCEPTED', 'CONVERTED', ?, ?
          FROM incidents WHERE id = ? AND version = ?`,
-      )
-      .bind(
-        operationId("incident-event"),
-        context.session.userId,
-        `Convertida en ${number}.`,
-        now,
-        incident.id,
-        nextVersion,
-      ),
-    ...[
-      [
-        "INCIDENT_CONVERTED",
-        "INCIDENT",
-        incident.id,
-        { status: "ACCEPTED" },
-        { status: "CONVERTED", workOrderId, number },
-      ],
-      [
-        "WORK_ORDER_CREATED",
-        "WORK_ORDER",
-        workOrderId,
-        null,
-        { number, status: "APPROVED", incidentId: incident.id },
-      ],
-    ].map(([action, entityType, entityId, previousValue, newValue]) =>
-      db
-        .prepare(
-          `INSERT INTO audit_entries
+        )
+        .bind(
+          operationId("incident-event"),
+          context.session.userId,
+          `Convertida en ${number}.`,
+          now,
+          incident.id,
+          nextVersion,
+        ),
+      ...[
+        [
+          "INCIDENT_CONVERTED",
+          "INCIDENT",
+          incident.id,
+          { status: "ACCEPTED" },
+          { status: "CONVERTED", workOrderId, number },
+        ],
+        [
+          "WORK_ORDER_CREATED",
+          "WORK_ORDER",
+          workOrderId,
+          null,
+          { number, status: "APPROVED", incidentId: incident.id },
+        ],
+      ].map(([action, entityType, entityId, previousValue, newValue]) =>
+        db
+          .prepare(
+            `INSERT INTO audit_entries
             (id, organization_id, site_id, actor_id, action, entity_type, entity_id,
              previous_value, new_value, request_id, created_at)
            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
            WHERE EXISTS (SELECT 1 FROM work_orders WHERE id = ? AND incident_id = ?)`,
-        )
-        .bind(
-          operationId("audit"),
-          context.session.organizationId,
-          context.session.siteId,
-          context.session.userId,
-          action as string,
-          entityType as string,
-          entityId as string,
-          previousValue === null ? null : jsonValue(previousValue),
-          jsonValue(newValue),
-          context.requestId,
-          now,
-          workOrderId,
-          incident.id,
-        ),
-    ),
-  ]);
+          )
+          .bind(
+            operationId("audit"),
+            context.session.organizationId,
+            context.session.siteId,
+            context.session.userId,
+            action as string,
+            entityType as string,
+            entityId as string,
+            previousValue === null ? null : jsonValue(previousValue),
+            jsonValue(newValue),
+            context.requestId,
+            now,
+            workOrderId,
+            incident.id,
+          ),
+      ),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0]);
   const insertedOrder = results[1];
   if (Number(insertedOrder?.meta?.changes ?? 0) !== 1) {

@@ -1,14 +1,12 @@
+import { scopedQueries } from "./scoped-queries";
 import {
-  buildPareto,
   calculateHealthScore,
-  calculateRepeatFailureRate,
   calculateTrend,
   classifyFailurePattern,
   type HealthBreakdownItem,
   type TrendDirection,
 } from "@/lib/domain/reliability";
 import type { TenantScope } from "./shared";
-import { queryAll, queryFirst } from "./shared";
 
 const OPEN_STATES =
   "('REQUESTED','TRIAGE','APPROVED','PLANNED','SCHEDULED','ASSIGNED','IN_PROGRESS','PAUSED','WAITING_PART','WAITING_VENDOR')";
@@ -68,6 +66,7 @@ type AssetMetricRow = {
   areaCode: string;
   areaName: string;
   failures: number;
+  repeatedFailures: number;
   emergencyFailures: number;
   repairMinutes: number;
   repairSamples: number;
@@ -238,15 +237,13 @@ export type ReliabilityCenterData = {
   };
 };
 
-async function loadAssetRows(
-  scope: TenantScope,
-  now: string,
-  assetId?: string,
-): Promise<AssetMetricRow[]> {
+function assetMetricQuery(scope: TenantScope, now: string, assetId?: string) {
   const start90 = daysBefore(now, 90);
   const start30 = daysBefore(now, 30);
   const assetFilter = assetId ? "AND asset.id = ?" : "";
   const params: Array<string | number | null> = [
+    now,
+    start90,
     start90,
     start30,
     start90,
@@ -261,9 +258,16 @@ async function loadAssetRows(
     scope.siteId,
   ];
   if (assetId) params.push(assetId);
-  return queryAll<AssetMetricRow>(
-    `
-    WITH failure AS (
+  return {
+    sql: `
+    WITH metric_cutoff AS (SELECT ? AS ends_at), failure_groups AS (
+      SELECT wo.asset_id, COUNT(*) AS occurrences
+      FROM scope_work_orders wo
+      WHERE wo.type='CORRECTIVE' AND wo.status IN ('COMPLETED','CLOSED') AND wo.requested_at >= ? AND wo.requested_at <= (SELECT ends_at FROM metric_cutoff)
+      GROUP BY wo.asset_id, COALESCE(wo.failure_mode_id,wo.failure_mode)
+    ), recurrence AS (
+      SELECT asset_id,SUM(occurrences-1) AS repeatedFailures FROM failure_groups GROUP BY asset_id
+    ), failure AS (
       SELECT wo.asset_id AS assetId,
         COUNT(*) AS failures,
         SUM(CASE WHEN wo.priority = 'P1_EMERGENCY' THEN 1 ELSE 0 END) AS emergencyFailures,
@@ -271,18 +275,19 @@ async function loadAssetRows(
           THEN MAX(0, (julianday(wo.actual_end) - julianday(wo.actual_start)) * 1440)
           ELSE 0 END) AS repairMinutes,
         SUM(CASE WHEN wo.actual_start IS NOT NULL AND wo.actual_end IS NOT NULL THEN 1 ELSE 0 END) AS repairSamples
-      FROM work_orders wo
+      FROM scope_work_orders wo
       WHERE wo.type = 'CORRECTIVE' AND wo.status IN ('COMPLETED','CLOSED')
-        AND wo.requested_at >= ?
+        AND wo.requested_at >= ? AND wo.requested_at <= (SELECT ends_at FROM metric_cutoff)
       GROUP BY wo.asset_id
     ), downtime AS (
       SELECT d.asset_id AS assetId,
         SUM(d.duration_minutes) AS downtimeMinutes,
         SUM(CASE WHEN d.started_at >= ? THEN d.duration_minutes ELSE 0 END) AS downtimeMinutes30
-      FROM downtime_events d WHERE d.started_at >= ?
+      FROM scope_downtime_events d WHERE d.started_at >= ?
+        AND d.started_at <= (SELECT ends_at FROM metric_cutoff)
         AND d.kind <> 'PLANNED'
         AND (d.work_order_id IS NULL OR EXISTS (
-          SELECT 1 FROM work_orders downtime_work
+          SELECT 1 FROM scope_work_orders downtime_work
           WHERE downtime_work.id = d.work_order_id AND downtime_work.type = 'CORRECTIVE'
         ))
       GROUP BY d.asset_id
@@ -294,28 +299,29 @@ async function loadAssetRows(
         SUM(CASE WHEN wo.status IN ${OPEN_STATES} AND wo.priority IN ('P1_EMERGENCY','P2_URGENT') THEN 1 ELSE 0 END) AS criticalBacklog,
         SUM(CASE WHEN wo.status IN ('COMPLETED','CLOSED') AND wo.actual_end >= ? THEN 1 ELSE 0 END) AS recentCompletedMaintenance,
         SUM(CASE WHEN wo.maintenance_plan_id IS NOT NULL AND wo.requested_at >= ? AND wo.status <> 'CANCELLED' THEN 1 ELSE 0 END) AS preventiveOrders
-      FROM work_orders wo GROUP BY wo.asset_id
+      FROM scope_work_orders wo WHERE wo.requested_at <= (SELECT ends_at FROM metric_cutoff) GROUP BY wo.asset_id
     ), incident AS (
       SELECT i.asset_id AS assetId,
         COUNT(*) AS openIncidents,
         SUM(CASE WHEN i.severity = 'CRITICAL' THEN 1 ELSE 0 END) AS criticalIncidents
-      FROM incidents i
+      FROM scope_incidents i
       WHERE i.status IN ('NEW','IN_TRIAGE','ACCEPTED')
       GROUP BY i.asset_id
     ), material AS (
       SELECT wo.asset_id AS assetId,
-        SUM(CASE WHEN usage.usage_type = 'RETURN' THEN -usage.total_cost ELSE usage.total_cost END) AS maintenanceCost,
+        SUM(usage.total_cost) AS maintenanceCost,
         SUM(CASE WHEN usage.usage_type = 'RETURN' THEN -usage.quantity ELSE usage.quantity END) AS mroQuantity
-      FROM work_order_part_usages usage
-      INNER JOIN work_orders wo ON wo.id = usage.work_order_id
-      WHERE usage.created_at >= ?
+      FROM scope_work_order_part_usages usage
+      INNER JOIN scope_work_orders wo ON wo.id = usage.work_order_id
+      WHERE usage.created_at >= ? AND usage.created_at <= (SELECT ends_at FROM metric_cutoff)
       GROUP BY wo.asset_id
-    )
+    ), metric_rows AS (
     SELECT asset.id, asset.code, asset.name, asset.criticality, asset.status,
       asset.commissioned_at AS commissionedAt,
       COALESCE(area.code, location.code) AS areaCode,
       COALESCE(area.name, location.name) AS areaName,
       COALESCE(failure.failures, 0) AS failures,
+      COALESCE(recurrence.repeatedFailures, 0) AS repeatedFailures,
       COALESCE(failure.emergencyFailures, 0) AS emergencyFailures,
       COALESCE(failure.repairMinutes, 0) AS repairMinutes,
       COALESCE(failure.repairSamples, 0) AS repairSamples,
@@ -330,28 +336,103 @@ async function loadAssetRows(
       COALESCE(work.preventiveOrders, 0) AS preventiveOrders,
       COALESCE(material.maintenanceCost, 0)
         + COALESCE((SELECT SUM(labor.labor_cost_cents) / 100.0
-          FROM labor_sessions labor INNER JOIN work_orders labor_work ON labor_work.id = labor.work_order_id
-          WHERE labor_work.asset_id = asset.id AND labor.started_at >= ?), 0)
+          FROM labor_sessions labor INNER JOIN scope_work_orders labor_work ON labor_work.id = labor.work_order_id
+          WHERE labor_work.asset_id = asset.id AND labor.started_at >= ? AND labor.started_at <= (SELECT ends_at FROM metric_cutoff)), 0)
         + COALESCE((SELECT SUM(cost.amount_cents) / 100.0
-          FROM work_order_cost_items cost INNER JOIN work_orders cost_work ON cost_work.id = cost.work_order_id
-          WHERE cost_work.asset_id = asset.id AND cost.recorded_at >= ?), 0) AS maintenanceCost,
+          FROM scope_work_order_cost_items cost INNER JOIN scope_work_orders cost_work ON cost_work.id = cost.work_order_id
+          WHERE cost_work.asset_id = asset.id AND cost.recorded_at >= ? AND cost.recorded_at <= (SELECT ends_at FROM metric_cutoff)), 0) AS maintenanceCost,
       COALESCE(material.mroQuantity, 0) AS mroQuantity
-    FROM assets asset
+    FROM scope_assets asset
     INNER JOIN functional_locations location ON location.id = asset.functional_location_id
     LEFT JOIN functional_locations area ON area.id = location.parent_id
     LEFT JOIN failure ON failure.assetId = asset.id
+    LEFT JOIN recurrence ON recurrence.asset_id = asset.id
     LEFT JOIN downtime ON downtime.assetId = asset.id
     LEFT JOIN work ON work.assetId = asset.id
     LEFT JOIN incident ON incident.assetId = asset.id
     LEFT JOIN material ON material.assetId = asset.id
     WHERE asset.organization_id = ? AND asset.site_id = ? AND asset.status <> 'RETIRED'
       ${assetFilter}
-    ORDER BY (COALESCE(downtime.downtimeMinutes, 0) * 2 + COALESCE(failure.failures, 0) * 120) DESC,
-      asset.criticality, asset.code
-    LIMIT 250
-  `,
+    )`,
     params,
+  };
+}
+
+async function loadAssetRows(
+  scope: TenantScope,
+  now: string,
+  assetId?: string,
+): Promise<AssetMetricRow[]> {
+  const query = assetMetricQuery(scope, now, assetId);
+  return scopedQueries(scope).queryAll<AssetMetricRow>(
+    `${query.sql}
+    SELECT * FROM metric_rows ORDER BY (downtimeMinutes*2+failures*120) DESC,criticality,code LIMIT 250`,
+    query.params,
   );
+}
+
+async function loadAssetPopulation(scope: TenantScope, now: string) {
+  const query = assetMetricQuery(scope, now);
+  return scopedQueries(scope).queryFirst<{
+    assets: number;
+    failures: number;
+    repeated: number;
+    downtime: number;
+    repair: number;
+    samples: number;
+    preventive: number;
+    emergency: number;
+    cost: number;
+    mro: number;
+  }>(
+    `${query.sql} SELECT COUNT(*) AS assets,COALESCE(SUM(failures),0) AS failures,COALESCE(SUM(repeatedFailures),0) AS repeated,
+    COALESCE(SUM(downtimeMinutes),0) AS downtime,COALESCE(SUM(repairMinutes),0) AS repair,
+    COALESCE(SUM(repairSamples),0) AS samples,COALESCE(SUM(preventiveOrders),0) AS preventive,
+    COALESCE(SUM(emergencyFailures),0) AS emergency,COALESCE(SUM(maintenanceCost),0) AS cost,
+    COALESCE(SUM(mroQuantity),0) AS mro FROM metric_rows`,
+    query.params,
+  );
+}
+
+async function loadPopulationPareto(
+  scope: TenantScope,
+  now: string,
+): Promise<ReliabilityCenterData["pareto"]> {
+  const query = assetMetricQuery(scope, now);
+  type Dimension = keyof ReliabilityCenterData["pareto"];
+  const rows = await scopedQueries(scope).queryAll<{
+    dimension: Dimension;
+    id: string;
+    label: string;
+    value: number;
+    share: number;
+    cumulativeShare: number;
+  }>(
+    `${query.sql}, dimensions AS (
+    SELECT 'downtimeByAsset' AS dimension,id,code || ' · ' || name AS label,downtimeMinutes AS value FROM metric_rows
+    UNION ALL SELECT 'downtimeByArea',areaCode,areaName,SUM(downtimeMinutes) FROM metric_rows GROUP BY areaCode,areaName
+    UNION ALL SELECT 'costByAsset',id,code || ' · ' || name,maintenanceCost FROM metric_rows
+    UNION ALL SELECT 'mroByAsset',id,code || ' · ' || name,mroQuantity FROM metric_rows
+    UNION ALL SELECT 'failuresByMode',COALESCE(mode.code,'UNCLASSIFIED'),COALESCE(mode.name,'Sin clasificar'),COUNT(*)
+      FROM scope_work_orders wo INNER JOIN scope_assets asset ON asset.id=wo.asset_id LEFT JOIN failure_modes mode ON mode.id=wo.failure_mode_id
+      WHERE wo.type='CORRECTIVE' AND wo.status IN ('COMPLETED','CLOSED') AND wo.requested_at>=? AND wo.requested_at <= (SELECT ends_at FROM metric_cutoff) GROUP BY COALESCE(mode.code,'UNCLASSIFIED'),mode.name
+    ), ranked AS (
+      SELECT *,SUM(value) OVER(PARTITION BY dimension) AS total,
+        SUM(value) OVER(PARTITION BY dimension ORDER BY value DESC,id ROWS UNBOUNDED PRECEDING) AS cumulative,
+        ROW_NUMBER() OVER(PARTITION BY dimension ORDER BY value DESC,id) AS position FROM dimensions WHERE value>0
+    ) SELECT dimension,id,label,value,value*100.0/total AS share,cumulative*100.0/total AS cumulativeShare
+      FROM ranked WHERE position<=10 ORDER BY dimension,position`,
+    [...query.params, daysBefore(now, 90)],
+  );
+  const result: ReliabilityCenterData["pareto"] = {
+    downtimeByAsset: [],
+    downtimeByArea: [],
+    costByAsset: [],
+    mroByAsset: [],
+    failuresByMode: [],
+  };
+  for (const { dimension, ...row } of rows) result[dimension].push(row);
+  return result;
 }
 
 async function loadFailureSignals(
@@ -359,6 +440,7 @@ async function loadFailureSignals(
   now: string,
   assetId?: string,
 ): Promise<FailureSignal[]> {
+  const { queryAll } = scopedQueries(scope);
   const start90 = daysBefore(now, 90);
   const start60 = daysBefore(now, 60);
   const start30 = daysBefore(now, 30);
@@ -368,6 +450,7 @@ async function loadFailureSignals(
     start60,
     start30,
     start90,
+    now,
     scope.organizationId,
     scope.siteId,
   ];
@@ -397,15 +480,15 @@ async function loadFailureSignals(
       SUM(CASE WHEN wo.requested_at >= ? THEN 1 ELSE 0 END) AS recent30,
       SUM(CASE WHEN wo.requested_at >= ? AND wo.requested_at < ? THEN 1 ELSE 0 END) AS previous30,
       COALESCE(SUM((SELECT COALESCE(SUM(d.duration_minutes), 0)
-        FROM downtime_events d WHERE d.work_order_id = wo.id)), 0) AS downtimeMinutes,
+        FROM scope_downtime_events d WHERE d.work_order_id = wo.id)), 0) AS downtimeMinutes,
       MIN(wo.requested_at) AS firstAt, MAX(wo.requested_at) AS lastAt,
       GROUP_CONCAT(DISTINCT wo.failure_cause) AS causes,
       GROUP_CONCAT(DISTINCT wo.failure_effect) AS effects
-    FROM work_orders wo
-    INNER JOIN assets asset ON asset.id = wo.asset_id
+    FROM scope_work_orders wo
+    INNER JOIN scope_assets asset ON asset.id = wo.asset_id
     LEFT JOIN failure_modes mode ON mode.id = wo.failure_mode_id
     WHERE wo.type = 'CORRECTIVE' AND wo.status IN ('COMPLETED','CLOSED')
-      AND wo.requested_at >= ? AND wo.organization_id = ? AND wo.site_id = ?
+      AND wo.requested_at BETWEEN ? AND ? AND wo.organization_id = ? AND wo.site_id = ?
       ${filter}
     GROUP BY asset.id, COALESCE(wo.failure_mode_id, wo.failure_mode)
     ORDER BY count90 DESC, downtimeMinutes DESC
@@ -449,16 +532,11 @@ async function loadFailureSignals(
 
 function makeBadActors(
   rows: AssetMetricRow[],
-  signals: FailureSignal[],
   now: string,
 ): ReliabilityBadActor[] {
   const exposureMinutes = 90 * 24 * 60;
   return rows.map((row) => {
-    const assetSignals = signals.filter((signal) => signal.assetId === row.id);
-    const repeated = assetSignals.reduce(
-      (sum, signal) => sum + Math.max(0, signal.count90 - 1),
-      0,
-    );
+    const repeated = safeNumber(row.repeatedFailures);
     const health = calculateHealthScore(
       {
         criticality: row.criticality,
@@ -523,6 +601,7 @@ async function loadTrends(
   scope: TenantScope,
   now: string,
 ): Promise<ReliabilityTrend[]> {
+  const { queryFirst } = scopedQueries(scope);
   const currentStart = daysBefore(now, 30);
   const previousStart = daysBefore(now, 60);
   const row = await queryFirst<{
@@ -535,16 +614,20 @@ async function loadTrends(
     currentRepairSamples: number;
     previousRepairSamples: number;
   }>(
-    `SELECT
-      (SELECT COUNT(*) FROM work_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.status IN ('COMPLETED','CLOSED') AND wo.requested_at >= ?) AS currentFailures,
-      (SELECT COUNT(*) FROM work_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.status IN ('COMPLETED','CLOSED') AND wo.requested_at >= ? AND wo.requested_at < ?) AS previousFailures,
-      (SELECT COALESCE(SUM(duration_minutes),0) FROM downtime_events d WHERE d.site_id = ? AND d.started_at >= ?) AS currentDowntime,
-      (SELECT COALESCE(SUM(duration_minutes),0) FROM downtime_events d WHERE d.site_id = ? AND d.started_at >= ? AND d.started_at < ?) AS previousDowntime,
-      (SELECT COALESCE(SUM((julianday(actual_end)-julianday(actual_start))*1440),0) FROM work_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.actual_start IS NOT NULL AND wo.actual_end IS NOT NULL AND wo.requested_at >= ?) AS currentRepair,
-      (SELECT COALESCE(SUM((julianday(actual_end)-julianday(actual_start))*1440),0) FROM work_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.actual_start IS NOT NULL AND wo.actual_end IS NOT NULL AND wo.requested_at >= ? AND wo.requested_at < ?) AS previousRepair,
-      (SELECT COUNT(*) FROM work_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.actual_start IS NOT NULL AND wo.actual_end IS NOT NULL AND wo.requested_at >= ?) AS currentRepairSamples,
-      (SELECT COUNT(*) FROM work_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.actual_start IS NOT NULL AND wo.actual_end IS NOT NULL AND wo.requested_at >= ? AND wo.requested_at < ?) AS previousRepairSamples`,
+    `WITH trend_orders AS (SELECT * FROM scope_work_orders WHERE requested_at <= ?),
+      trend_downtime AS (SELECT * FROM scope_downtime_events WHERE started_at <= ?)
+    SELECT
+      (SELECT COUNT(*) FROM trend_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.status IN ('COMPLETED','CLOSED') AND wo.requested_at >= ?) AS currentFailures,
+      (SELECT COUNT(*) FROM trend_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.status IN ('COMPLETED','CLOSED') AND wo.requested_at >= ? AND wo.requested_at < ?) AS previousFailures,
+      (SELECT COALESCE(SUM(duration_minutes),0) FROM trend_downtime d WHERE d.site_id = ? AND d.started_at >= ?) AS currentDowntime,
+      (SELECT COALESCE(SUM(duration_minutes),0) FROM trend_downtime d WHERE d.site_id = ? AND d.started_at >= ? AND d.started_at < ?) AS previousDowntime,
+      (SELECT COALESCE(SUM((julianday(actual_end)-julianday(actual_start))*1440),0) FROM trend_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.actual_start IS NOT NULL AND wo.actual_end IS NOT NULL AND wo.requested_at >= ?) AS currentRepair,
+      (SELECT COALESCE(SUM((julianday(actual_end)-julianday(actual_start))*1440),0) FROM trend_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.actual_start IS NOT NULL AND wo.actual_end IS NOT NULL AND wo.requested_at >= ? AND wo.requested_at < ?) AS previousRepair,
+      (SELECT COUNT(*) FROM trend_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.actual_start IS NOT NULL AND wo.actual_end IS NOT NULL AND wo.requested_at >= ?) AS currentRepairSamples,
+      (SELECT COUNT(*) FROM trend_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.actual_start IS NOT NULL AND wo.actual_end IS NOT NULL AND wo.requested_at >= ? AND wo.requested_at < ?) AS previousRepairSamples`,
     [
+      now,
+      now,
       scope.siteId,
       currentStart,
       scope.siteId,
@@ -631,6 +714,7 @@ async function loadPreventiveEffectiveness(
   scope: TenantScope,
   now: string,
 ): Promise<PreventiveEffectiveness[]> {
+  const { queryAll } = scopedQueries(scope);
   const start90 = daysBefore(now, 90);
   const rows = await queryAll<{
     planId: string;
@@ -647,11 +731,11 @@ async function loadPreventiveEffectiveness(
       COUNT(DISTINCT CASE WHEN preventive.id IS NOT NULL AND preventive.status <> 'CANCELLED' THEN preventive.id END) AS pmWindows,
       COUNT(DISTINCT CASE WHEN preventive.completed_at IS NOT NULL AND preventive.completed_at <= COALESCE(preventive.preventive_due_at, preventive.due_at) THEN preventive.id END) AS pmOnTime,
       COUNT(DISTINCT corrective.id) AS correctiveCount
-    FROM maintenance_plans plan
-    INNER JOIN assets asset ON asset.id = plan.asset_id
-    LEFT JOIN work_orders preventive ON preventive.maintenance_plan_id = plan.id
+    FROM scope_maintenance_plans plan
+    INNER JOIN scope_assets asset ON asset.id = plan.asset_id
+    LEFT JOIN scope_work_orders preventive ON preventive.maintenance_plan_id = plan.id
       AND COALESCE(preventive.preventive_due_at, preventive.due_at) >= ?
-    LEFT JOIN work_orders corrective ON corrective.asset_id = plan.asset_id
+    LEFT JOIN scope_work_orders corrective ON corrective.asset_id = plan.asset_id
       AND corrective.type = 'CORRECTIVE' AND corrective.status IN ('COMPLETED','CLOSED')
       AND corrective.requested_at >= ?
     WHERE plan.organization_id = ? AND plan.site_id = ? AND plan.status = 'ACTIVE'
@@ -697,6 +781,7 @@ export async function getReliabilityCenter(
   scope: TenantScope,
   asOf = new Date().toISOString(),
 ): Promise<ReliabilityCenterData> {
+  const { queryAll } = scopedQueries(scope);
   const start90 = daysBefore(asOf, 90);
   const [
     assetRows,
@@ -705,6 +790,8 @@ export async function getReliabilityCenter(
     rcas,
     preventiveEffectiveness,
     catalogs,
+    population,
+    populationPareto,
   ] = await Promise.all([
     loadAssetRows(scope, asOf),
     loadFailureSignals(scope, asOf),
@@ -717,9 +804,9 @@ export async function getReliabilityCenter(
       `SELECT d.production_impact AS key,
           CASE d.production_impact WHEN 'FULL_STOP' THEN 'Parada total'
             WHEN 'REDUCED_SPEED' THEN 'Producción degradada'
-            WHEN 'MICRO_STOP' THEN 'Microparada' ELSE 'Sin impacto productivo' END AS label,
+            WHEN 'MICROSTOP' THEN 'Microparada' ELSE 'Sin impacto productivo' END AS label,
           SUM(d.duration_minutes) AS minutes, COUNT(*) AS events
-         FROM downtime_events d
+         FROM scope_downtime_events d
          WHERE d.organization_id = ? AND d.site_id = ? AND d.started_at >= ?
          GROUP BY d.production_impact ORDER BY minutes DESC`,
       [scope.organizationId, scope.siteId, start90],
@@ -729,8 +816,8 @@ export async function getReliabilityCenter(
           rca.target_at AS targetAt, asset.code AS assetCode, asset.name AS assetName,
           mode.name AS failureModeName, owner.full_name AS ownerName,
           SUM(CASE WHEN action.status IN ('OPEN','IN_PROGRESS') THEN 1 ELSE 0 END) AS openActions
-         FROM root_cause_analyses rca
-         INNER JOIN assets asset ON asset.id = rca.asset_id
+         FROM scope_root_cause_analyses rca
+         INNER JOIN scope_assets asset ON asset.id = rca.asset_id
          INNER JOIN users owner ON owner.id = rca.owner_id
          LEFT JOIN failure_modes mode ON mode.id = rca.failure_mode_id
          LEFT JOIN rca_actions action ON action.root_cause_analysis_id = rca.id
@@ -743,7 +830,7 @@ export async function getReliabilityCenter(
     loadPreventiveEffectiveness(scope, asOf),
     Promise.all([
       queryAll<{ id: string; code: string; name: string }>(
-        "SELECT id, code, name FROM assets WHERE organization_id = ? AND site_id = ? AND status <> 'RETIRED' ORDER BY code LIMIT 500",
+        "SELECT id, code, name FROM scope_assets WHERE organization_id = ? AND site_id = ? AND status <> 'RETIRED' ORDER BY code LIMIT 500",
         [scope.organizationId, scope.siteId],
       ),
       queryAll<{ id: string; code: string; name: string }>(
@@ -758,43 +845,26 @@ export async function getReliabilityCenter(
         [scope.organizationId],
       ),
     ]),
+    loadAssetPopulation(scope, asOf),
+    loadPopulationPareto(scope, asOf),
   ]);
 
-  const badActors = makeBadActors(assetRows, signals, asOf).sort(
+  const badActors = makeBadActors(assetRows, asOf).sort(
     (left, right) => right.impactScore - left.impactScore,
   );
-  const totalFailures = badActors.reduce(
-    (sum, item) => sum + item.failureCount,
-    0,
-  );
-  const totalDowntime = badActors.reduce(
-    (sum, item) => sum + item.downtimeMinutes,
-    0,
-  );
-  const totalRepair = assetRows.reduce(
-    (sum, item) => sum + safeNumber(item.repairMinutes),
-    0,
-  );
-  const repairSamples = assetRows.reduce(
-    (sum, item) => sum + safeNumber(item.repairSamples),
-    0,
-  );
-  const totalPreventive = assetRows.reduce(
-    (sum, item) => sum + safeNumber(item.preventiveOrders),
-    0,
-  );
-  const emergencyFailures = assetRows.reduce(
-    (sum, item) => sum + safeNumber(item.emergencyFailures),
-    0,
-  );
+  const totalFailures = safeNumber(population?.failures);
+  const totalDowntime = safeNumber(population?.downtime);
+  const totalRepair = safeNumber(population?.repair);
+  const repairSamples = safeNumber(population?.samples);
+  const totalPreventive = safeNumber(population?.preventive);
+  const emergencyFailures = safeNumber(population?.emergency);
   const siteMetrics = reliabilityMetrics({
     failures: totalFailures,
     downtimeMinutes: totalDowntime,
     repairMinutes: totalRepair,
     repairSamples,
-    exposureMinutes: Math.max(1, assetRows.length) * 90 * 24 * 60,
+    exposureMinutes: Math.max(1, safeNumber(population?.assets)) * 90 * 24 * 60,
   });
-  const repeatedGroupCounts = signals.map((signal) => signal.count90);
   const totalDowntimeByType = downtime.reduce(
     (sum, item) => sum + safeNumber(item.minutes),
     0,
@@ -807,33 +877,6 @@ export async function getReliabilityCenter(
       ? (safeNumber(item.minutes) / totalDowntimeByType) * 100
       : 0,
   }));
-  const areaMap = new Map<
-    string,
-    { id: string; label: string; value: number }
-  >();
-  const modeMap = new Map<
-    string,
-    { id: string; label: string; value: number }
-  >();
-  for (const actor of badActors) {
-    const current = areaMap.get(actor.areaCode) ?? {
-      id: actor.areaCode,
-      label: actor.areaName,
-      value: 0,
-    };
-    current.value += actor.downtimeMinutes;
-    areaMap.set(actor.areaCode, current);
-  }
-  for (const signal of signals) {
-    const current = modeMap.get(signal.failureModeCode) ?? {
-      id: signal.failureModeCode,
-      label: signal.failureModeName,
-      value: 0,
-    };
-    current.value += signal.count90;
-    modeMap.set(signal.failureModeCode, current);
-  }
-
   const insufficient: string[] = [];
   if (siteMetrics.mtbfMinutes === null)
     insufficient.push(
@@ -841,9 +884,9 @@ export async function getReliabilityCenter(
     );
   if (siteMetrics.mttrMinutes === null)
     insufficient.push("MTTR requiere tiempos reales de reparación cerrados.");
-  if (!badActors.some((item) => item.maintenanceCost > 0))
+  if (safeNumber(population?.cost) <= 0)
     insufficient.push(
-      "Coste limitado a consumos MRO con snapshot histórico; no hay tarifa laboral.",
+      "No hay costes de mantenimiento registrados en la ventana.",
     );
 
   return {
@@ -852,50 +895,23 @@ export async function getReliabilityCenter(
       startsAt: start90,
       endsAt: asOf,
       basis:
-        "Disponibilidad técnica agregada sobre tiempo calendario por activo; sin calendario productivo modelado.",
+        "Disponibilidad técnica sobre tiempo calendario 24/7 por activo. Reporting utiliza exposición del calendario productivo.",
     },
     summary: {
       ...siteMetrics,
-      repeatFailureRate: calculateRepeatFailureRate(repeatedGroupCounts),
+      repeatFailureRate: ratio(safeNumber(population?.repeated), totalFailures),
       emergencyCorrectiveRatio: ratio(emergencyFailures, totalFailures),
       preventiveCorrectiveRatio: ratio(
         totalPreventive,
         totalPreventive + totalFailures,
       ),
-      maintenanceCost: badActors.reduce(
-        (sum, item) => sum + item.maintenanceCost,
-        0,
-      ),
-      mroQuantity: badActors.reduce((sum, item) => sum + item.mroQuantity, 0),
+      maintenanceCost: safeNumber(population?.cost),
+      mroQuantity: safeNumber(population?.mro),
       insufficient,
     },
     badActors: badActors.slice(0, 20),
     signals: signals.slice(0, 20),
-    pareto: {
-      downtimeByAsset: buildPareto(
-        badActors.map((item) => ({
-          id: item.id,
-          label: `${item.code} · ${item.name}`,
-          value: item.downtimeMinutes,
-        })),
-      ).slice(0, 10),
-      downtimeByArea: buildPareto([...areaMap.values()]).slice(0, 10),
-      failuresByMode: buildPareto([...modeMap.values()]).slice(0, 10),
-      costByAsset: buildPareto(
-        badActors.map((item) => ({
-          id: item.id,
-          label: `${item.code} · ${item.name}`,
-          value: item.maintenanceCost,
-        })),
-      ).slice(0, 10),
-      mroByAsset: buildPareto(
-        badActors.map((item) => ({
-          id: item.id,
-          label: `${item.code} · ${item.name}`,
-          value: item.mroQuantity,
-        })),
-      ).slice(0, 10),
-    },
+    pareto: populationPareto,
     downtime: downtimeWithShare,
     trends: await loadTrends(scope, asOf),
     preventiveEffectiveness,
@@ -923,6 +939,7 @@ export async function getAssetReliability(
   assetId: string,
   asOf = new Date().toISOString(),
 ): Promise<AssetReliabilityData | null> {
+  const { queryAll } = scopedQueries(scope);
   const [rows, signals, rcas, preventive] = await Promise.all([
     loadAssetRows(scope, asOf, assetId),
     loadFailureSignals(scope, asOf, assetId),
@@ -931,8 +948,8 @@ export async function getAssetReliability(
         rca.target_at AS targetAt, asset.code AS assetCode, asset.name AS assetName,
         mode.name AS failureModeName, owner.full_name AS ownerName,
         SUM(CASE WHEN action.status IN ('OPEN','IN_PROGRESS') THEN 1 ELSE 0 END) AS openActions
-       FROM root_cause_analyses rca
-       INNER JOIN assets asset ON asset.id = rca.asset_id
+       FROM scope_root_cause_analyses rca
+       INNER JOIN scope_assets asset ON asset.id = rca.asset_id
        INNER JOIN users owner ON owner.id = rca.owner_id
        LEFT JOIN failure_modes mode ON mode.id = rca.failure_mode_id
        LEFT JOIN rca_actions action ON action.root_cause_analysis_id = rca.id
@@ -943,7 +960,7 @@ export async function getAssetReliability(
     loadPreventiveEffectiveness(scope, asOf),
   ]);
   if (!rows[0]) return null;
-  const metrics = makeBadActors(rows, signals, asOf)[0];
+  const metrics = makeBadActors(rows, asOf)[0];
   return {
     metrics,
     signals,
@@ -1022,6 +1039,7 @@ export async function getRootCauseAnalysis(
   scope: TenantScope,
   number: string,
 ): Promise<RootCauseAnalysisDetail | null> {
+  const { queryAll, queryFirst } = scopedQueries(scope);
   const rca = await queryFirst<
     Omit<
       RootCauseAnalysisDetail,
@@ -1036,12 +1054,12 @@ export async function getRootCauseAnalysis(
       creator.full_name AS createdByName, mode.name AS failureModeName,
       mode.code AS failureModeCode, wo.number AS sourceWorkOrderNumber,
       wo.title AS sourceWorkOrderTitle
-     FROM root_cause_analyses rca
-     INNER JOIN assets asset ON asset.id = rca.asset_id
+     FROM scope_root_cause_analyses rca
+     INNER JOIN scope_assets asset ON asset.id = rca.asset_id
      INNER JOIN users owner ON owner.id = rca.owner_id
      INNER JOIN users creator ON creator.id = rca.created_by_id
      LEFT JOIN failure_modes mode ON mode.id = rca.failure_mode_id
-     LEFT JOIN work_orders wo ON wo.id = rca.source_work_order_id
+     LEFT JOIN scope_work_orders wo ON wo.id = rca.source_work_order_id
      WHERE rca.organization_id = ? AND rca.site_id = ? AND rca.number = ? LIMIT 1`,
     [scope.organizationId, scope.siteId, number],
   );
@@ -1064,8 +1082,8 @@ export async function getRootCauseAnalysis(
           plan.code AS linkedMaintenancePlanCode
          FROM rca_actions action
          INNER JOIN users owner ON owner.id = action.owner_id
-         LEFT JOIN work_orders wo ON wo.id = action.linked_work_order_id
-         LEFT JOIN maintenance_plans plan ON plan.id = action.linked_maintenance_plan_id
+         LEFT JOIN scope_work_orders wo ON wo.id = action.linked_work_order_id
+         LEFT JOIN scope_maintenance_plans plan ON plan.id = action.linked_maintenance_plan_id
          WHERE action.root_cause_analysis_id = ?
          ORDER BY CASE action.status WHEN 'OPEN' THEN 0 WHEN 'IN_PROGRESS' THEN 1 ELSE 2 END,
            action.target_at`,
@@ -1087,7 +1105,7 @@ export async function getRootCauseAnalysis(
         [scope.organizationId],
       ),
       queryAll<{ id: string; code: string; title: string }>(
-        "SELECT id, code, title FROM maintenance_plans WHERE organization_id = ? AND site_id = ? ORDER BY code",
+        "SELECT id, code, title FROM scope_maintenance_plans WHERE organization_id = ? AND site_id = ? ORDER BY code",
         [scope.organizationId, scope.siteId],
       ),
     ]);

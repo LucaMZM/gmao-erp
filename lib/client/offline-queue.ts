@@ -1,6 +1,7 @@
 "use client";
 
 export type OfflineQueueState = "PENDING" | "SYNCING" | "SYNCED" | "FAILED";
+type OfflineScope = { userId: string; siteId: string; organizationId: string };
 
 export type OfflineOperation = {
   key: string;
@@ -10,11 +11,42 @@ export type OfflineOperation = {
   attempts: number;
   createdAt: string;
   lastError: string | null;
+  scope?: OfflineScope;
 };
 
 const DB_NAME = "mazmi-field-operations";
 const STORE = "operations";
 const EVENT = "mazmi-offline-queue-change";
+
+function currentScope(): OfflineScope {
+  const element = document.querySelector<HTMLElement>("[data-offline-user]");
+  const {
+    offlineUser: userId,
+    offlineSite: siteId,
+    offlineOrg: organizationId,
+  } = element?.dataset ?? {};
+  if (!userId || !siteId || !organizationId)
+    throw new Error("No hay una sesión operativa identificada.");
+  return { userId, siteId, organizationId };
+}
+
+function sameScope(scope: OfflineScope | undefined): boolean {
+  if (!scope) return false; // Legacy entries have no trustworthy author: retain, never replay.
+  const current = currentScope();
+  return (
+    scope.userId === current.userId &&
+    scope.siteId === current.siteId &&
+    scope.organizationId === current.organizationId
+  );
+}
+
+function scopeHeaders(scope: OfflineScope) {
+  return {
+    "x-mazmi-user": scope.userId,
+    "x-mazmi-site": scope.siteId,
+    "x-mazmi-organization": scope.organizationId,
+  };
+}
 
 export function isOfflineOperationSupported(
   path: string,
@@ -44,9 +76,16 @@ async function transaction<T>(
 ): Promise<T> {
   const db = await database();
   return new Promise((resolve, reject) => {
-    const request = run(db.transaction(STORE, mode).objectStore(STORE));
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    const tx = db.transaction(STORE, mode);
+    const request = run(tx.objectStore(STORE));
+    tx.oncomplete = () => {
+      db.close();
+      resolve(request.result);
+    };
+    tx.onerror = tx.onabort = () => {
+      db.close();
+      reject(tx.error ?? request.error);
+    };
   });
 }
 
@@ -67,6 +106,8 @@ export async function enqueueOfflineOperation(
   path: string,
   body: Record<string, unknown>,
 ): Promise<OfflineOperation> {
+  if (!isOfflineOperationSupported(path, body))
+    throw new Error("Esta operación requiere conexión.");
   const operation: OfflineOperation = {
     key: `field_${crypto.randomUUID()}`,
     path,
@@ -75,6 +116,7 @@ export async function enqueueOfflineOperation(
     attempts: 0,
     createdAt: new Date().toISOString(),
     lastError: null,
+    scope: currentScope(),
   };
   await save(operation);
   return operation;
@@ -84,6 +126,9 @@ export async function postWithOfflineQueue(
   path: string,
   body: Record<string, unknown>,
 ): Promise<{ queued: boolean; response?: Response }> {
+  if (!isOfflineOperationSupported(path, body))
+    throw new Error("Esta operación requiere conexión.");
+  const scope = currentScope();
   if (!navigator.onLine) {
     await enqueueOfflineOperation(path, body);
     return { queued: true };
@@ -95,6 +140,7 @@ export async function postWithOfflineQueue(
       headers: {
         "content-type": "application/json",
         "idempotency-key": key,
+        ...scopeHeaders(scope),
       },
       body: JSON.stringify(body),
     });
@@ -108,17 +154,31 @@ export async function postWithOfflineQueue(
       attempts: 0,
       createdAt: new Date().toISOString(),
       lastError: null,
+      scope,
     });
     return { queued: true };
   }
 }
 
-export async function syncOfflineQueue(): Promise<void> {
+let syncing: Promise<void> | null = null;
+export function syncOfflineQueue(): Promise<void> {
+  syncing ??= syncPendingOperations().finally(() => {
+    syncing = null;
+  });
+  return syncing;
+}
+
+async function syncPendingOperations(): Promise<void> {
   if (!navigator.onLine) return;
   const operations = (await listOfflineOperations()).filter((item) =>
-    ["PENDING", "FAILED"].includes(item.state),
+    ["PENDING", "FAILED", "SYNCING"].includes(item.state),
   );
   for (const operation of operations) {
+    if (
+      !sameScope(operation.scope) ||
+      !isOfflineOperationSupported(operation.path, operation.body)
+    )
+      continue;
     await save({ ...operation, state: "SYNCING" });
     try {
       const response = await fetch(operation.path, {
@@ -126,6 +186,7 @@ export async function syncOfflineQueue(): Promise<void> {
         headers: {
           "content-type": "application/json",
           "idempotency-key": operation.key,
+          ...scopeHeaders(operation.scope!),
         },
         body: JSON.stringify(operation.body),
       });

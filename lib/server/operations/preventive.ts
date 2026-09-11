@@ -13,7 +13,9 @@ import type { DemoUserSession } from "@/lib/server/auth";
 import { ensureDatabase } from "@/lib/server/database";
 import { ApiContractError } from "@/lib/server/http";
 import {
+  atomicBatch,
   assertMutationApplied,
+  assertLocationScope,
   jsonValue,
   nextPlantNumber,
   operationId,
@@ -80,6 +82,7 @@ async function findPlan(
       "El plan no existe en el centro activo.",
     );
   }
+  await assertLocationScope(session, plan.functionalLocationId);
   return plan;
 }
 
@@ -209,6 +212,7 @@ export async function createMaintenancePlan(
     );
   }
   assertAssetAcceptsPlannedWork(asset.status);
+  await assertLocationScope(context.session, asset.locationId);
   const owner = await db
     .prepare(
       `SELECT user.id FROM users user
@@ -447,7 +451,7 @@ export async function createMaintenancePlan(
         now,
       ),
   ];
-  const results = await db.batch(statements);
+  const results = await atomicBatch(db, statements, [0]);
   assertMutationApplied(results[0]);
   return { code };
 }
@@ -776,7 +780,7 @@ export async function generatePreventiveWorkOrder(
   ];
   let results: D1Result<unknown>[];
   try {
-    results = await db.batch(statements);
+    results = await atomicBatch(db, statements, [0, 1]);
   } catch (error) {
     const concurrent = await db
       .prepare(
@@ -814,40 +818,44 @@ export async function setMaintenancePlanStatus(
   if (plan.status === status) return;
   const now = operationNow(context);
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE maintenance_plans SET status = ?, version = version + 1, updated_at = ?
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE maintenance_plans SET status = ?, version = version + 1, updated_at = ?
          WHERE id = ? AND organization_id = ? AND site_id = ? AND version = ?`,
-      )
-      .bind(
-        status,
-        now,
-        plan.id,
-        context.session.organizationId,
-        context.session.siteId,
-        expectedVersion,
-      ),
-    db
-      .prepare(
-        `INSERT INTO audit_entries
+        )
+        .bind(
+          status,
+          now,
+          plan.id,
+          context.session.organizationId,
+          context.session.siteId,
+          expectedVersion,
+        ),
+      db
+        .prepare(
+          `INSERT INTO audit_entries
           (id, organization_id, site_id, actor_id, action, entity_type, entity_id,
            previous_value, new_value, request_id, created_at)
          SELECT ?, organization_id, site_id, ?, 'MAINTENANCE_PLAN_STATUS_CHANGED',
            'MAINTENANCE_PLAN', id, ?, ?, ?, ?
          FROM maintenance_plans WHERE id = ? AND version = ?`,
-      )
-      .bind(
-        operationId("audit"),
-        context.session.userId,
-        jsonValue({ status: plan.status }),
-        jsonValue({ status }),
-        context.requestId,
-        now,
-        plan.id,
-        expectedVersion + 1,
-      ),
-  ]);
+        )
+        .bind(
+          operationId("audit"),
+          context.session.userId,
+          jsonValue({ status: plan.status }),
+          jsonValue({ status }),
+          context.requestId,
+          now,
+          plan.id,
+          expectedVersion + 1,
+        ),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0]);
 }
 
@@ -862,7 +870,8 @@ export async function recordMeterReading(
   const meter = await db
     .prepare(
       `SELECT id, code, reading_type AS readingType, last_value AS lastValue,
-        last_reading_at AS lastReadingAt, version
+        last_reading_at AS lastReadingAt, version,
+        (SELECT functional_location_id FROM assets WHERE id = meters.asset_id) AS functionalLocationId
        FROM meters WHERE id = ? AND organization_id = ? AND site_id = ?
          AND status = 'ACTIVE' LIMIT 1`,
     )
@@ -874,6 +883,7 @@ export async function recordMeterReading(
       lastValue: number | null;
       lastReadingAt: string | null;
       version: number;
+      functionalLocationId: string;
     }>();
   if (!meter) {
     throw new ApiContractError(
@@ -882,6 +892,7 @@ export async function recordMeterReading(
       "El contador no existe en el centro activo.",
     );
   }
+  await assertLocationScope(context.session, meter.functionalLocationId);
   assertValidMeterReading({
     readingAt: input.recordedAt,
     value: input.value,
@@ -891,41 +902,43 @@ export async function recordMeterReading(
   });
   const now = operationNow(context);
   const nextVersion = meter.version + 1;
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE meters SET last_value = ?, last_reading_at = ?,
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE meters SET last_value = ?, last_reading_at = ?,
           version = version + 1, updated_at = ?
          WHERE id = ? AND organization_id = ? AND site_id = ? AND version = ?`,
-      )
-      .bind(
-        input.value,
-        input.recordedAt,
-        now,
-        meter.id,
-        context.session.organizationId,
-        context.session.siteId,
-        meter.version,
-      ),
-    db
-      .prepare(
-        `INSERT INTO meter_readings
+        )
+        .bind(
+          input.value,
+          input.recordedAt,
+          now,
+          meter.id,
+          context.session.organizationId,
+          context.session.siteId,
+          meter.version,
+        ),
+      db
+        .prepare(
+          `INSERT INTO meter_readings
           (id, meter_id, recorded_by_id, value, recorded_at, source, note, created_at)
          SELECT ?, id, ?, ?, ?, 'MANUAL', ?, ? FROM meters WHERE id = ? AND version = ?`,
-      )
-      .bind(
-        operationId("meter-reading"),
-        context.session.userId,
-        input.value,
-        input.recordedAt,
-        input.note?.trim() || null,
-        now,
-        meter.id,
-        nextVersion,
-      ),
-    db
-      .prepare(
-        `UPDATE maintenance_plans SET
+        )
+        .bind(
+          operationId("meter-reading"),
+          context.session.userId,
+          input.value,
+          input.recordedAt,
+          input.note?.trim() || null,
+          now,
+          meter.id,
+          nextVersion,
+        ),
+      db
+        .prepare(
+          `UPDATE maintenance_plans SET
           next_due_at = CASE
             WHEN trigger_mode = 'METER' THEN ?
             WHEN calendar_next_at IS NULL OR calendar_next_at > ? THEN ?
@@ -934,36 +947,41 @@ export async function recordMeterReading(
          WHERE meter_id = ? AND organization_id = ? AND site_id = ?
            AND status = 'ACTIVE' AND meter_threshold IS NOT NULL
            AND meter_threshold <= ?`,
-      )
-      .bind(
-        input.recordedAt,
-        input.recordedAt,
-        input.recordedAt,
-        now,
-        meter.id,
-        context.session.organizationId,
-        context.session.siteId,
-        input.value,
-      ),
-    db
-      .prepare(
-        `INSERT INTO audit_entries
+        )
+        .bind(
+          input.recordedAt,
+          input.recordedAt,
+          input.recordedAt,
+          now,
+          meter.id,
+          context.session.organizationId,
+          context.session.siteId,
+          input.value,
+        ),
+      db
+        .prepare(
+          `INSERT INTO audit_entries
           (id, organization_id, site_id, actor_id, action, entity_type, entity_id,
            previous_value, new_value, request_id, created_at)
          SELECT ?, organization_id, site_id, ?, 'METER_READING_RECORDED', 'METER', id,
            ?, ?, ?, ? FROM meters WHERE id = ? AND version = ?`,
-      )
-      .bind(
-        operationId("audit"),
-        context.session.userId,
-        jsonValue({ value: meter.lastValue, recordedAt: meter.lastReadingAt }),
-        jsonValue({ value: input.value, recordedAt: input.recordedAt }),
-        context.requestId,
-        now,
-        meter.id,
-        nextVersion,
-      ),
-  ]);
+        )
+        .bind(
+          operationId("audit"),
+          context.session.userId,
+          jsonValue({
+            value: meter.lastValue,
+            recordedAt: meter.lastReadingAt,
+          }),
+          jsonValue({ value: input.value, recordedAt: input.recordedAt }),
+          context.requestId,
+          now,
+          meter.id,
+          nextVersion,
+        ),
+    ],
+    [0, 1],
+  );
   assertMutationApplied(results[0]);
   assertMutationApplied(results[1], "No se ha podido registrar la lectura.");
   const due = await db

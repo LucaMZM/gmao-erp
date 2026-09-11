@@ -5,7 +5,9 @@ import type { DemoUserSession } from "@/lib/server/auth";
 import { ensureDatabase } from "@/lib/server/database";
 import { ApiContractError } from "@/lib/server/http";
 import {
+  atomicBatch,
   assertMutationApplied,
+  assertLocationScope,
   jsonValue,
   nextPlantNumber,
   operationId,
@@ -46,6 +48,7 @@ async function findRca(
       "La investigación no existe en el centro activo.",
     );
   }
+  await assertLocationScope(session, row.functionalLocationId);
   return row;
 }
 
@@ -89,11 +92,11 @@ export async function createRootCauseAnalysis(
   const db = getD1();
   const asset = await db
     .prepare(
-      `SELECT id FROM assets WHERE id = ? AND organization_id = ? AND site_id = ?
+      `SELECT id, functional_location_id AS functionalLocationId FROM assets WHERE id = ? AND organization_id = ? AND site_id = ?
        AND status <> 'RETIRED' LIMIT 1`,
     )
     .bind(input.assetId, context.session.organizationId, context.session.siteId)
-    .first<{ id: string }>();
+    .first<{ id: string; functionalLocationId: string }>();
   if (!asset) {
     throw new ApiContractError(
       422,
@@ -102,6 +105,7 @@ export async function createRootCauseAnalysis(
     );
   }
   await assertOwner(context.session, input.ownerId);
+  await assertLocationScope(context.session, asset.functionalLocationId);
   if (input.sourceWorkOrderId) {
     const source = await db
       .prepare(
@@ -300,7 +304,7 @@ export async function saveRcaInvestigation(
         now,
       ),
   ];
-  const results = await db.batch(statements);
+  const results = await atomicBatch(db, statements, [0]);
   assertMutationApplied(results[0]);
 }
 
@@ -490,7 +494,7 @@ export async function createRcaAction(
         now,
       ),
   );
-  const results = await db.batch(statements);
+  const results = await atomicBatch(db, statements, [statements.length - 3]);
   const updateIndex = statements.length - 3;
   assertMutationApplied(results[updateIndex]);
   return workOrderNumber ? { actionId, workOrderNumber } : { actionId };
@@ -566,44 +570,48 @@ export async function changeRcaStatus(
     rca.rootCause,
   );
   const now = operationNow(context);
-  const results = await getD1().batch([
-    getD1()
-      .prepare(
-        "UPDATE root_cause_analyses SET status = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
-      )
-      .bind(input.status, now, rca.id, input.version),
-    getD1()
-      .prepare(
-        "INSERT INTO rca_events (id, root_cause_analysis_id, actor_id, event_type, from_status, to_status, note, created_at) VALUES (?, ?, ?, 'RCA_STATUS_CHANGED', ?, ?, ?, ?)",
-      )
-      .bind(
-        operationId("event"),
-        rca.id,
-        context.session.userId,
-        rca.status,
-        input.status,
-        "Estado de investigación actualizado.",
-        now,
-      ),
-    getD1()
-      .prepare(
-        `INSERT INTO audit_entries
+  const results = await atomicBatch(
+    getD1(),
+    [
+      getD1()
+        .prepare(
+          "UPDATE root_cause_analyses SET status = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
+        )
+        .bind(input.status, now, rca.id, input.version),
+      getD1()
+        .prepare(
+          "INSERT INTO rca_events (id, root_cause_analysis_id, actor_id, event_type, from_status, to_status, note, created_at) VALUES (?, ?, ?, 'RCA_STATUS_CHANGED', ?, ?, ?, ?)",
+        )
+        .bind(
+          operationId("event"),
+          rca.id,
+          context.session.userId,
+          rca.status,
+          input.status,
+          "Estado de investigación actualizado.",
+          now,
+        ),
+      getD1()
+        .prepare(
+          `INSERT INTO audit_entries
           (id, organization_id, site_id, actor_id, action, entity_type, entity_id,
            previous_value, new_value, request_id, created_at)
          VALUES (?, ?, ?, ?, 'RCA_STATUS_CHANGED', 'ROOT_CAUSE_ANALYSIS', ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        operationId("audit"),
-        context.session.organizationId,
-        context.session.siteId,
-        context.session.userId,
-        rca.id,
-        jsonValue({ status: rca.status }),
-        jsonValue({ status: input.status }),
-        context.requestId,
-        now,
-      ),
-  ]);
+        )
+        .bind(
+          operationId("audit"),
+          context.session.organizationId,
+          context.session.siteId,
+          context.session.userId,
+          rca.id,
+          jsonValue({ status: rca.status }),
+          jsonValue({ status: input.status }),
+          context.requestId,
+          now,
+        ),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0]);
 }
 
@@ -622,24 +630,28 @@ export async function completeRcaAction(
     );
   }
   const now = operationNow(context);
-  const results = await getD1().batch([
-    getD1()
-      .prepare(
-        `UPDATE rca_actions SET status = 'DONE', completed_at = ?, updated_at = ?
+  const results = await atomicBatch(
+    getD1(),
+    [
+      getD1()
+        .prepare(
+          `UPDATE rca_actions SET status = 'DONE', completed_at = ?, updated_at = ?
          WHERE id = ? AND root_cause_analysis_id = ? AND status IN ('OPEN','IN_PROGRESS')`,
-      )
-      .bind(now, now, input.actionId, rca.id),
-    getD1()
-      .prepare(
-        "INSERT INTO rca_events (id, root_cause_analysis_id, actor_id, event_type, note, created_at) VALUES (?, ?, ?, 'RCA_ACTION_COMPLETED', ?, ?)",
-      )
-      .bind(
-        operationId("event"),
-        rca.id,
-        context.session.userId,
-        input.actionId,
-        now,
-      ),
-  ]);
+        )
+        .bind(now, now, input.actionId, rca.id),
+      getD1()
+        .prepare(
+          "INSERT INTO rca_events (id, root_cause_analysis_id, actor_id, event_type, note, created_at) VALUES (?, ?, ?, 'RCA_ACTION_COMPLETED', ?, ?)",
+        )
+        .bind(
+          operationId("event"),
+          rca.id,
+          context.session.userId,
+          input.actionId,
+          now,
+        ),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0], "La acción ya no está abierta.");
 }

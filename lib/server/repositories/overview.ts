@@ -1,8 +1,8 @@
+import { scopedQueries } from "./scoped-queries";
 import { dateKeyInTimeZone } from "@/lib/presentation";
 import { calendarAvailability } from "@/lib/domain/production-calendar";
 import { getProductionExposure } from "./governance";
 import type { TenantScope } from "./shared";
-import { queryAll, queryFirst } from "./shared";
 
 const OPEN_STATES =
   "('REQUESTED','TRIAGE','APPROVED','PLANNED','SCHEDULED','ASSIGNED','IN_PROGRESS','PAUSED','WAITING_PART','WAITING_VENDOR')";
@@ -112,6 +112,7 @@ export type OverviewData = {
 };
 
 export async function getOverview(scope: TenantScope): Promise<OverviewData> {
+  const { queryAll, queryFirst } = scopedQueries(scope);
   const now = new Date().toISOString();
   const today = dateKeyInTimeZone(now);
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86_400_000).toISOString();
@@ -120,31 +121,31 @@ export async function getOverview(scope: TenantScope): Promise<OverviewData> {
   const metrics = await queryFirst<MetricRow>(
     `
     SELECT
-      (SELECT COUNT(*) FROM work_orders wo WHERE wo.site_id = ? AND wo.status IN ${OPEN_STATES}) AS openOrders,
-      (SELECT COUNT(*) FROM work_orders wo WHERE wo.site_id = ? AND wo.status IN ${OPEN_STATES} AND wo.due_at < ?) AS overdueOrders,
-      (SELECT COUNT(*) FROM assets a WHERE a.site_id = ? AND a.criticality = 'CRITICAL' AND a.status != 'RETIRED') AS criticalAssets,
-      (SELECT COUNT(*) FROM assets a WHERE a.site_id = ? AND a.status != 'RETIRED' AND (a.health_score < 75 OR a.status IN ('DOWN','DEGRADED'))) AS riskAssets,
-      (SELECT COALESCE(SUM(estimated_minutes),0) FROM work_orders wo WHERE wo.site_id = ? AND wo.status IN ${OPEN_STATES}) AS backlogMinutes,
-      (SELECT COUNT(*) FROM work_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.status IN ('COMPLETED','CLOSED') AND wo.actual_end >= ?) AS correctiveCount,
-      (SELECT COALESCE(SUM(downtime_minutes),0) FROM work_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.status IN ('COMPLETED','CLOSED') AND wo.actual_end >= ?) AS correctiveMinutes,
-      (SELECT COUNT(*) FROM work_orders wo WHERE wo.site_id = ?
+      (SELECT COUNT(*) FROM scope_work_orders wo WHERE wo.site_id = ? AND wo.status IN ${OPEN_STATES}) AS openOrders,
+      (SELECT COUNT(*) FROM scope_work_orders wo WHERE wo.site_id = ? AND wo.status IN ${OPEN_STATES} AND wo.due_at < ?) AS overdueOrders,
+      (SELECT COUNT(*) FROM scope_assets a WHERE a.site_id = ? AND a.criticality = 'CRITICAL' AND a.status != 'RETIRED') AS criticalAssets,
+      (SELECT COUNT(*) FROM scope_assets a WHERE a.site_id = ? AND a.status != 'RETIRED' AND (a.health_score < 75 OR a.status IN ('DOWN','DEGRADED'))) AS riskAssets,
+      (SELECT COALESCE(SUM(estimated_minutes),0) FROM scope_work_orders wo WHERE wo.site_id = ? AND wo.status IN ${OPEN_STATES}) AS backlogMinutes,
+      (SELECT COUNT(*) FROM scope_work_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.status IN ('COMPLETED','CLOSED') AND wo.actual_start IS NOT NULL AND wo.actual_end BETWEEN ? AND ?) AS correctiveCount,
+      (SELECT COALESCE(SUM((julianday(actual_end)-julianday(actual_start))*1440),0) FROM scope_work_orders wo WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE' AND wo.status IN ('COMPLETED','CLOSED') AND wo.actual_start IS NOT NULL AND wo.actual_end BETWEEN ? AND ?) AS correctiveMinutes,
+      (SELECT COUNT(*) FROM scope_work_orders wo WHERE wo.site_id = ?
         AND wo.maintenance_plan_id IS NOT NULL
         AND COALESCE(wo.preventive_due_at, wo.due_at) BETWEEN ? AND ?
         AND wo.status <> 'CANCELLED') AS pmScheduled,
-      (SELECT COUNT(*) FROM work_orders wo WHERE wo.site_id = ?
+      (SELECT COUNT(*) FROM scope_work_orders wo WHERE wo.site_id = ?
         AND wo.maintenance_plan_id IS NOT NULL
         AND COALESCE(wo.preventive_due_at, wo.due_at) BETWEEN ? AND ?
         AND wo.completed_at IS NOT NULL
         AND wo.completed_at <= COALESCE(wo.preventive_due_at, wo.due_at)) AS pmOnTime,
-      (SELECT COUNT(*) FROM work_orders wo WHERE wo.site_id = ?
+      (SELECT COUNT(*) FROM scope_work_orders wo WHERE wo.site_id = ?
         AND wo.maintenance_plan_id IS NOT NULL
         AND COALESCE(wo.preventive_due_at, wo.due_at) BETWEEN ? AND ?
         AND wo.status <> 'CANCELLED'
         AND (wo.completed_at IS NULL OR wo.completed_at > COALESCE(wo.preventive_due_at, wo.due_at))) AS pmOverdue,
-      (SELECT COALESCE(SUM(duration_minutes),0) FROM downtime_events d WHERE d.site_id = ? AND d.started_at >= ?) AS downtimeMinutes,
-      (SELECT COUNT(*) FROM assets a INNER JOIN asset_classes c ON c.id = a.asset_class_id WHERE a.site_id = ? AND a.parent_asset_id IS NULL AND c.code IN ('PRINT_LINE','LAM_LINE','COAT_LINE','SLITTER')) AS productionLines,
-      (SELECT COUNT(*) FROM incidents incident WHERE incident.site_id = ? AND incident.status IN ('NEW','IN_TRIAGE','ACCEPTED')) AS openIncidents,
-      (SELECT COUNT(*) FROM incidents incident WHERE incident.site_id = ? AND incident.status IN ('NEW','IN_TRIAGE','ACCEPTED') AND incident.severity = 'CRITICAL') AS criticalIncidents
+      (SELECT COALESCE(SUM(duration_minutes),0) FROM scope_downtime_events d WHERE d.site_id = ? AND d.started_at >= ?) AS downtimeMinutes,
+      (SELECT COUNT(*) FROM scope_assets a INNER JOIN asset_classes c ON c.id = a.asset_class_id WHERE a.site_id = ? AND a.parent_asset_id IS NULL AND c.code IN ('PRINT_LINE','LAM_LINE','COAT_LINE','SLITTER')) AS productionLines,
+      (SELECT COUNT(*) FROM scope_incidents incident WHERE incident.site_id = ? AND incident.status IN ('NEW','IN_TRIAGE','ACCEPTED')) AS openIncidents,
+      (SELECT COUNT(*) FROM scope_incidents incident WHERE incident.site_id = ? AND incident.status IN ('NEW','IN_TRIAGE','ACCEPTED') AND incident.severity = 'CRITICAL') AS criticalIncidents
   `,
     [
       scope.siteId,
@@ -155,8 +156,10 @@ export async function getOverview(scope: TenantScope): Promise<OverviewData> {
       scope.siteId,
       scope.siteId,
       ninetyDaysAgo,
+      now,
       scope.siteId,
       ninetyDaysAgo,
+      now,
       scope.siteId,
       thirtyDaysAgo,
       now,
@@ -195,13 +198,13 @@ export async function getOverview(scope: TenantScope): Promise<OverviewData> {
       (SELECT COUNT(*) FROM part_site_policies policy
        WHERE policy.site_id = ? AND policy.critical = 1
          AND COALESCE((SELECT SUM(stock.on_hand - stock.reserved)
-           FROM stock_levels stock WHERE stock.part_id = policy.part_id
+           FROM scope_stock_levels stock WHERE stock.part_id = policy.part_id
              AND stock.site_id = policy.site_id), 0) <= 0) AS criticalStockouts,
-      (SELECT COUNT(*) FROM purchase_orders WHERE site_id = ?
+      (SELECT COUNT(*) FROM scope_purchase_orders WHERE site_id = ?
        AND status IN ('SENT','PARTIALLY_RECEIVED') AND expected_at < ?) AS delayedOrders,
-      (SELECT COUNT(*) FROM purchase_orders WHERE site_id = ?
+      (SELECT COUNT(*) FROM scope_purchase_orders WHERE site_id = ?
        AND status = 'PARTIALLY_RECEIVED') AS partialReceipts,
-      (SELECT COUNT(*) FROM work_orders WHERE site_id = ?
+      (SELECT COUNT(*) FROM scope_work_orders WHERE site_id = ?
        AND status = 'WAITING_PART') AS waitingPartOrders`,
     [scope.siteId, scope.siteId, now, scope.siteId, scope.siteId],
   );
@@ -227,16 +230,16 @@ export async function getOverview(scope: TenantScope): Promise<OverviewData> {
       SUM(CASE WHEN asset.status = 'DOWN' THEN 1 ELSE 0 END) AS downCount,
       COUNT(DISTINCT CASE WHEN wo.status IN ${OPEN_STATES} THEN wo.id END) AS openOrders,
       COALESCE((SELECT SUM(down.duration_minutes)
-        FROM downtime_events down
-        INNER JOIN assets down_asset ON down_asset.id = down.asset_id
+        FROM scope_downtime_events down
+        INNER JOIN scope_assets down_asset ON down_asset.id = down.asset_id
         INNER JOIN functional_locations down_location ON down_location.id = down_asset.functional_location_id
         LEFT JOIN functional_locations down_parent ON down_parent.id = down_location.parent_id
         WHERE down.site_id = ? AND down.started_at >= ?
           AND COALESCE(down_parent.code, down_location.code) = COALESCE(parent.code, location.code)), 0) AS downtimeMinutes
-    FROM assets asset
+    FROM scope_assets asset
     INNER JOIN functional_locations location ON location.id = asset.functional_location_id
     LEFT JOIN functional_locations parent ON parent.id = location.parent_id
-    LEFT JOIN work_orders wo ON wo.asset_id = asset.id
+    LEFT JOIN scope_work_orders wo ON wo.asset_id = asset.id
     WHERE asset.site_id = ? AND asset.parent_asset_id IS NULL
     GROUP BY COALESCE(parent.code, location.code), COALESCE(parent.name, location.name)
     ORDER BY averageHealth ASC, name ASC
@@ -264,9 +267,9 @@ export async function getOverview(scope: TenantScope): Promise<OverviewData> {
       asset.status,
       location.name AS locationName,
       COUNT(wo.id) AS openOrders
-    FROM assets asset
+    FROM scope_assets asset
     INNER JOIN functional_locations location ON location.id = asset.functional_location_id
-    LEFT JOIN work_orders wo ON wo.asset_id = asset.id AND wo.status IN ${OPEN_STATES}
+    LEFT JOIN scope_work_orders wo ON wo.asset_id = asset.id AND wo.status IN ${OPEN_STATES}
     WHERE asset.site_id = ?
       AND asset.status != 'RETIRED'
       AND (asset.health_score < 76 OR asset.status IN ('DOWN','DEGRADED'))
@@ -296,8 +299,8 @@ export async function getOverview(scope: TenantScope): Promise<OverviewData> {
        WHERE assignment.work_order_id = wo.id AND assignment.unassigned_at IS NULL
        ORDER BY assignment.assigned_at DESC, assignment.id
        LIMIT 1) AS assigneeName
-    FROM work_orders wo
-    INNER JOIN assets asset ON asset.id = wo.asset_id
+    FROM scope_work_orders wo
+    INNER JOIN scope_assets asset ON asset.id = wo.asset_id
     WHERE wo.site_id = ? AND wo.status IN ${OPEN_STATES}
     ORDER BY
       CASE wo.priority WHEN 'P1_EMERGENCY' THEN 1 WHEN 'P2_URGENT' THEN 2 WHEN 'P3_HIGH' THEN 3 ELSE 4 END,
@@ -323,8 +326,8 @@ export async function getOverview(scope: TenantScope): Promise<OverviewData> {
        LIMIT 1) AS assigneeName,
       asset.code AS assetCode,
       wo.status
-    FROM work_orders wo
-    INNER JOIN assets asset ON asset.id = wo.asset_id
+    FROM scope_work_orders wo
+    INNER JOIN scope_assets asset ON asset.id = wo.asset_id
     WHERE wo.site_id = ? AND substr(wo.planned_start, 1, 10) = ?
     ORDER BY wo.planned_start
     LIMIT 6
@@ -340,8 +343,8 @@ export async function getOverview(scope: TenantScope): Promise<OverviewData> {
       SUM(CASE WHEN wo.requested_at >= ? THEN 1 ELSE 0 END) AS recentFailures,
       SUM(CASE WHEN wo.requested_at >= ? AND wo.requested_at < ? THEN 1 ELSE 0 END) AS previousFailures,
       COALESCE(SUM((SELECT COALESCE(SUM(d.duration_minutes), 0)
-        FROM downtime_events d WHERE d.work_order_id = wo.id)), 0) AS downtimeMinutes
-     FROM work_orders wo INNER JOIN assets asset ON asset.id = wo.asset_id
+        FROM scope_downtime_events d WHERE d.work_order_id = wo.id)), 0) AS downtimeMinutes
+     FROM scope_work_orders wo INNER JOIN scope_assets asset ON asset.id = wo.asset_id
      WHERE wo.site_id = ? AND wo.type = 'CORRECTIVE'
        AND wo.status IN ('COMPLETED','CLOSED') AND wo.requested_at >= ?
      GROUP BY asset.id HAVING COUNT(*) >= 2 OR downtimeMinutes >= 300

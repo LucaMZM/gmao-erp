@@ -8,7 +8,8 @@ import {
   UserRound,
 } from "lucide-react";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
+import { hasPermission } from "@/lib/domain/governance";
 import { IncidentTriageActions } from "@/components/incidents/incident-triage-actions";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { can } from "@/lib/domain/permissions";
@@ -32,9 +33,13 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const session = await getCurrentSession();
   const { number } = await params;
-  const data = session
-    ? await getIncidentDetail(tenantScope(session), decodeURIComponent(number))
-    : null;
+  const data =
+    session && hasPermission(session.permissionCodes, "incident.report")
+      ? await getIncidentDetail(
+          tenantScope(session),
+          decodeURIComponent(number),
+        )
+      : null;
   return {
     title: data
       ? `${data.incident.number} · ${data.incident.title}`
@@ -48,6 +53,8 @@ export default async function IncidentDetailPage({
   params: Params;
 }) {
   const session = await requireDemoSession();
+  if (!hasPermission(session.permissionCodes, "incident.report"))
+    redirect("/overview");
   const { number } = await params;
   const data = await getIncidentDetail(
     tenantScope(session),

@@ -3,7 +3,10 @@ import { z } from "zod";
 import { assertSameOrigin, requireApiSession } from "@/lib/server/auth";
 import { getEvidenceStorage } from "@/lib/server/file-storage";
 import { apiErrorResponse, readJsonBody } from "@/lib/server/http";
-import { createEvidenceMetadata } from "@/lib/server/operations/field";
+import {
+  createEvidenceMetadata,
+  authorizeFieldReplay,
+} from "@/lib/server/operations/field";
 import { operationId } from "@/lib/server/operations/shared";
 import { runIdempotent } from "@/lib/server/operations/shared";
 import {
@@ -44,6 +47,7 @@ export async function POST(
 ) {
   const requestId = crypto.randomUUID();
   let storedKey: string | null = null;
+  let metadataCommitted = false;
   try {
     await assertSameOrigin();
     const session = await requireApiSession();
@@ -65,6 +69,11 @@ export async function POST(
     const evidenceId = operationId("evidence");
     const input = parsed.data;
     const context = { session, requestId };
+    await authorizeFieldReplay(
+      context,
+      decodeURIComponent(number),
+      "FIELD_EVIDENCE",
+    );
     const { value, replayed } = await runIdempotent(
       context,
       request.headers.get("idempotency-key"),
@@ -106,15 +115,17 @@ export async function POST(
           ...input,
           ...fileMetadata,
         });
+        metadataCommitted = true;
         return { id: evidenceId, ok: true };
       },
+      { number: decodeURIComponent(number), input },
     );
     return NextResponse.json(
       { data: value, replayed, requestId },
       { status: replayed ? 200 : 201 },
     );
   } catch (error) {
-    if (storedKey) {
+    if (storedKey && !metadataCommitted) {
       try {
         await getEvidenceStorage().delete(storedKey);
       } catch {

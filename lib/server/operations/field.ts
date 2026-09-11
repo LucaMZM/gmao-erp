@@ -11,6 +11,7 @@ import { sanitizeEvidenceFileName } from "@/lib/domain/evidence-policy";
 import { ApiContractError } from "@/lib/server/http";
 import {
   assertLocationScope,
+  commitIdempotentOperation,
   jsonValue,
   operationId,
   operationNow,
@@ -33,6 +34,7 @@ type FieldOrder = {
 async function findFieldOrder(
   context: OperationContext,
   number: string,
+  allowFinal = false,
 ): Promise<FieldOrder> {
   const order = await getD1()
     .prepare(
@@ -65,7 +67,7 @@ async function findFieldOrder(
     );
   }
   await assertLocationScope(context.session, order.functionalLocationId);
-  if (["CLOSED", "CANCELLED"].includes(order.status)) {
+  if (!allowFinal && ["CLOSED", "CANCELLED"].includes(order.status)) {
     throw new ApiContractError(
       409,
       "WORK_ORDER_NOT_FIELD_EDITABLE",
@@ -90,6 +92,16 @@ async function findFieldOrder(
     }
   }
   return order;
+}
+
+/** Re-evaluate grants and resource access even on idempotent replay. */
+export async function authorizeFieldReplay(
+  context: OperationContext,
+  number: string,
+  permission: "FIELD_CHECKLIST" | "METER_RECORD" | "FIELD_EVIDENCE",
+) {
+  assertPermission(context.session, permission);
+  await findFieldOrder(context, number, true);
 }
 
 function workOrderEvent(
@@ -233,44 +245,48 @@ export async function answerChecklistTask(
   });
   const now = operationNow(context);
   const db = getD1();
-  await db.batch([
-    db
-      .prepare(
-        `UPDATE work_order_tasks SET response_value = ?, response_status = ?,
+  await commitIdempotentOperation(
+    context,
+    [
+      db
+        .prepare(
+          `UPDATE work_order_tasks SET response_value = ?, response_status = ?,
           responded_at = ?, responded_by_id = ?, completed_at = ?,
           completed_by_id = ? WHERE id = ? AND work_order_id = ?`,
-      )
-      .bind(
-        result.value,
-        result.status,
-        now,
-        context.session.userId,
-        result.satisfiesRequirement ? now : null,
-        result.satisfiesRequirement ? context.session.userId : null,
-        task.id,
+        )
+        .bind(
+          result.value,
+          result.status,
+          now,
+          context.session.userId,
+          result.satisfiesRequirement ? now : null,
+          result.satisfiesRequirement ? context.session.userId : null,
+          task.id,
+          order.id,
+        ),
+      workOrderEvent(
+        db,
+        context,
         order.id,
+        "CHECKLIST_TASK_RECORDED",
+        `${task.title}: ${result.status === "FAIL" ? "no conforme" : "registrado"}.`,
+        now,
       ),
-    workOrderEvent(
-      db,
-      context,
-      order.id,
-      "CHECKLIST_TASK_RECORDED",
-      `${task.title}: ${result.status === "FAIL" ? "no conforme" : "registrado"}.`,
-      now,
-    ),
-    fieldAudit(
-      db,
-      context,
-      order.id,
-      "CHECKLIST_TASK_RECORDED",
-      {
-        taskId: task.id,
-        value: result.value,
-        status: result.status,
-      },
-      now,
-    ),
-  ]);
+      fieldAudit(
+        db,
+        context,
+        order.id,
+        "CHECKLIST_TASK_RECORDED",
+        {
+          taskId: task.id,
+          value: result.value,
+          status: result.status,
+        },
+        now,
+      ),
+    ],
+    result,
+  );
   return result;
 }
 
@@ -516,7 +532,11 @@ export async function recordWorkOrderMeasurement(
         ),
     );
   }
-  await db.batch(statements);
+  await commitIdempotentOperation(context, statements, {
+    id: measurementId,
+    result,
+    meterReadingId,
+  });
   return { id: measurementId, result, meterReadingId };
 }
 
@@ -543,60 +563,64 @@ export async function createEvidenceMetadata(
     new Date(now).getTime() + 5 * 365 * 86_400_000,
   ).toISOString();
   const db = getD1();
-  await db.batch([
-    db
-      .prepare(
-        `INSERT INTO evidence_items
+  await commitIdempotentOperation(
+    context,
+    [
+      db
+        .prepare(
+          `INSERT INTO evidence_items
           (id, organization_id, site_id, work_order_id, incident_id, asset_id,
            root_cause_analysis_id, author_id, kind, stage, description,
            storage_provider, storage_key, file_name, safe_file_name, content_type,
            size_bytes, checksum_sha256, retention_until, scan_status, created_at)
          VALUES (?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NOT_CONFIGURED', ?)`,
-      )
-      .bind(
-        input.id,
-        context.session.organizationId,
-        context.session.siteId,
+        )
+        .bind(
+          input.id,
+          context.session.organizationId,
+          context.session.siteId,
+          order.id,
+          order.assetId,
+          context.session.userId,
+          input.kind,
+          input.stage,
+          input.description.trim(),
+          input.kind === "NOTE" ? "NONE" : "R2",
+          input.storageKey ?? null,
+          input.fileName ?? null,
+          input.fileName ? sanitizeEvidenceFileName(input.fileName) : null,
+          input.contentType ?? null,
+          input.sizeBytes ?? null,
+          input.checksumSha256 ?? null,
+          retentionUntil,
+          now,
+        ),
+      workOrderEvent(
+        db,
+        context,
         order.id,
-        order.assetId,
-        context.session.userId,
-        input.kind,
-        input.stage,
-        input.description.trim(),
-        input.kind === "NOTE" ? "NONE" : "R2",
-        input.storageKey ?? null,
-        input.fileName ?? null,
-        input.fileName ? sanitizeEvidenceFileName(input.fileName) : null,
-        input.contentType ?? null,
-        input.sizeBytes ?? null,
-        input.checksumSha256 ?? null,
-        retentionUntil,
+        "EVIDENCE_ADDED",
+        `${input.kind === "NOTE" ? "Nota" : "Evidencia"} ${input.stage.toLowerCase()} añadida: ${input.description.trim()}.`,
         now,
       ),
-    workOrderEvent(
-      db,
-      context,
-      order.id,
-      "EVIDENCE_ADDED",
-      `${input.kind === "NOTE" ? "Nota" : "Evidencia"} ${input.stage.toLowerCase()} añadida: ${input.description.trim()}.`,
-      now,
-    ),
-    fieldAudit(
-      db,
-      context,
-      order.id,
-      "EVIDENCE_ADDED",
-      {
-        evidenceId: input.id,
-        kind: input.kind,
-        stage: input.stage,
-      },
-      now,
-    ),
-  ]);
+      fieldAudit(
+        db,
+        context,
+        order.id,
+        "EVIDENCE_ADDED",
+        {
+          evidenceId: input.id,
+          kind: input.kind,
+          stage: input.stage,
+        },
+        now,
+      ),
+    ],
+    { id: input.id, ok: true },
+  );
 }
 
-export async function createShiftHandover(
+export async function authorizeHandover(
   context: OperationContext,
   input: {
     fromShift: string;
@@ -606,7 +630,7 @@ export async function createShiftHandover(
     partsPending?: string | null;
     workOrderNumbers: string[];
   },
-): Promise<{ id: string }> {
+) {
   assertPermission(context.session, "SHIFT_HANDOVER_CREATE");
   assertHandover(input);
   const uniqueNumbers = [...new Set(input.workOrderNumbers)].slice(0, 12);
@@ -614,7 +638,8 @@ export async function createShiftHandover(
   const orders = uniqueNumbers.length
     ? await getD1()
         .prepare(
-          `SELECT work_order.id, work_order.number, work_order.status
+          `SELECT work_order.id, work_order.number, work_order.status,
+             work_order.functional_location_id AS functionalLocationId
            FROM work_orders work_order
            WHERE work_order.organization_id = ? AND work_order.site_id = ?
              AND work_order.number IN (${placeholders})
@@ -628,8 +653,20 @@ export async function createShiftHandover(
             ? [context.session.userId]
             : []),
         )
-        .all<{ id: string; number: string; status: string }>()
-    : { results: [] as Array<{ id: string; number: string; status: string }> };
+        .all<{
+          id: string;
+          number: string;
+          status: string;
+          functionalLocationId: string;
+        }>()
+    : {
+        results: [] as Array<{
+          id: string;
+          number: string;
+          status: string;
+          functionalLocationId: string;
+        }>,
+      };
   if ((orders.results ?? []).length !== uniqueNumbers.length) {
     throw new ApiContractError(
       422,
@@ -637,70 +674,87 @@ export async function createShiftHandover(
       "Alguna orden no pertenece al técnico o al centro activo.",
     );
   }
+  for (const order of orders.results ?? [])
+    await assertLocationScope(context.session, order.functionalLocationId);
+  return { orders, uniqueNumbers };
+}
+
+export async function createShiftHandover(
+  context: OperationContext,
+  input: Parameters<typeof authorizeHandover>[1],
+): Promise<{ id: string }> {
+  const { orders, uniqueNumbers } = await authorizeHandover(context, input);
   const now = operationNow(context);
   const handoverId = operationId("handover");
   const db = getD1();
-  await db.batch([
-    db
-      .prepare(
-        `INSERT INTO shift_handovers
+  await commitIdempotentOperation(
+    context,
+    [
+      db
+        .prepare(
+          `INSERT INTO shift_handovers
           (id, organization_id, site_id, author_id, from_shift, to_shift,
            summary, risks, parts_pending, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        handoverId,
-        context.session.organizationId,
-        context.session.siteId,
-        context.session.userId,
-        input.fromShift.trim(),
-        input.toShift.trim(),
-        input.summary.trim(),
-        input.risks?.trim() || null,
-        input.partsPending?.trim() || null,
-        now,
-      ),
-    ...(orders.results ?? []).flatMap((order) => [
-      db
-        .prepare(
-          `INSERT INTO shift_handover_work_orders
+        )
+        .bind(
+          handoverId,
+          context.session.organizationId,
+          context.session.siteId,
+          context.session.userId,
+          input.fromShift.trim(),
+          input.toShift.trim(),
+          input.summary.trim(),
+          input.risks?.trim() || null,
+          input.partsPending?.trim() || null,
+          now,
+        ),
+      ...(orders.results ?? []).flatMap((order) => [
+        db
+          .prepare(
+            `INSERT INTO shift_handover_work_orders
             (id, handover_id, work_order_id, status_snapshot, note)
            VALUES (?, ?, ?, ?, NULL)`,
-        )
-        .bind(operationId("handover-work"), handoverId, order.id, order.status),
-      workOrderEvent(
-        db,
-        context,
-        order.id,
-        "SHIFT_HANDOVER_RECORDED",
-        `Incluida en relevo ${input.fromShift.trim()} → ${input.toShift.trim()}.`,
-        now,
-      ),
-    ]),
-    db
-      .prepare(
-        `INSERT INTO audit_entries
+          )
+          .bind(
+            operationId("handover-work"),
+            handoverId,
+            order.id,
+            order.status,
+          ),
+        workOrderEvent(
+          db,
+          context,
+          order.id,
+          "SHIFT_HANDOVER_RECORDED",
+          `Incluida en relevo ${input.fromShift.trim()} → ${input.toShift.trim()}.`,
+          now,
+        ),
+      ]),
+      db
+        .prepare(
+          `INSERT INTO audit_entries
           (id, organization_id, site_id, actor_id, action, entity_type, entity_id,
            previous_value, new_value, request_id, created_at)
          VALUES (?, ?, ?, ?, 'SHIFT_HANDOVER_CREATED', 'SHIFT_HANDOVER', ?, NULL, ?, ?, ?)`,
-      )
-      .bind(
-        operationId("audit"),
-        context.session.organizationId,
-        context.session.siteId,
-        context.session.userId,
-        handoverId,
-        jsonValue({
-          fromShift: input.fromShift,
-          toShift: input.toShift,
-          workOrders: uniqueNumbers,
-        }),
-        context.requestId,
-        now,
-      ),
-    db
-      .prepare(
-        `INSERT INTO notifications
+        )
+        .bind(
+          operationId("audit"),
+          context.session.organizationId,
+          context.session.siteId,
+          context.session.userId,
+          handoverId,
+          jsonValue({
+            fromShift: input.fromShift,
+            toShift: input.toShift,
+            workOrders: uniqueNumbers,
+          }),
+          context.requestId,
+          now,
+        ),
+      db
+        .prepare(
+          `INSERT INTO notifications
           (id, organization_id, site_id, user_id, title, body, severity,
            entity_type, entity_id, read_at, created_at)
          SELECT ? || '-' || profile.user_id, ?, ?, profile.user_id,
@@ -708,19 +762,21 @@ export async function createShiftHandover(
          FROM workforce_profiles profile
          WHERE profile.organization_id = ? AND profile.site_id = ?
            AND profile.shift_code = ? AND profile.user_id <> ?`,
-      )
-      .bind(
-        operationId("notification"),
-        context.session.organizationId,
-        context.session.siteId,
-        input.summary.trim(),
-        handoverId,
-        now,
-        context.session.organizationId,
-        context.session.siteId,
-        input.toShift.trim(),
-        context.session.userId,
-      ),
-  ]);
+        )
+        .bind(
+          operationId("notification"),
+          context.session.organizationId,
+          context.session.siteId,
+          input.summary.trim(),
+          handoverId,
+          now,
+          context.session.organizationId,
+          context.session.siteId,
+          input.toShift.trim(),
+          context.session.userId,
+        ),
+    ],
+    { id: handoverId },
+  );
   return { id: handoverId };
 }

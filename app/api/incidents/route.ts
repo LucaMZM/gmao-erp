@@ -2,7 +2,11 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { assertSameOrigin, requireApiSession } from "@/lib/server/auth";
 import { apiErrorResponse, readJsonBody } from "@/lib/server/http";
-import { reportIncident } from "@/lib/server/operations/incidents";
+import {
+  reportIncident,
+  resolveIncidentContext,
+} from "@/lib/server/operations/incidents";
+import { assertPermission } from "@/lib/domain/permissions";
 import { runIdempotent } from "@/lib/server/operations/shared";
 
 const schema = z.object({
@@ -44,11 +48,18 @@ export async function POST(request: Request) {
       );
     }
     const context = { session, requestId };
+    assertPermission(session, "INCIDENT_REPORT");
+    await resolveIncidentContext(
+      session,
+      parsed.data.functionalLocationId,
+      parsed.data.assetId,
+    );
     const { value: data, replayed } = await runIdempotent(
       context,
       request.headers.get("idempotency-key"),
       "INCIDENT_REPORT",
       () => reportIncident(context, parsed.data),
+      parsed.data,
     );
     return NextResponse.json(
       {

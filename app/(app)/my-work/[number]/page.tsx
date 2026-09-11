@@ -7,7 +7,8 @@ import {
   Wrench,
 } from "lucide-react";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
+import { hasPermission } from "@/lib/domain/governance";
 import { FieldWorkspace } from "@/components/field/field-workspace";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { formatDateTime, formatDuration, typeLabels } from "@/lib/presentation";
@@ -21,6 +22,8 @@ export default async function FieldWorkOrderPage({
   params: Promise<{ number: string }>;
 }) {
   const session = await requireDemoSession();
+  if (!hasPermission(session.permissionCodes, "workorder.execute"))
+    redirect("/overview");
   const { number } = await params;
   const data = await getFieldWorkOrder(
     tenantScope(session),

@@ -10,6 +10,9 @@ import {
 import { assertPermission } from "@/lib/domain/permissions";
 import { ApiContractError } from "@/lib/server/http";
 import {
+  assertLocationScope,
+  assertWarehouseScope,
+  atomicBatch,
   assertMutationApplied,
   jsonValue,
   operationId,
@@ -22,6 +25,7 @@ type OrderRow = {
   number: string;
   status: string;
   assetId: string | null;
+  functionalLocationId: string;
 };
 
 type StockPartRow = {
@@ -32,6 +36,7 @@ type StockPartRow = {
   stockId: string;
   stockVersion: number;
   binId: string;
+  warehouseId: string;
   onHand: number;
   reservedStock: number;
   onOrder: number;
@@ -45,7 +50,6 @@ type MaterialRow = StockPartRow & {
   reservedForOrder: number;
   consumed: number;
   returned: number;
-  historicalUnitCost: number | null;
 };
 
 async function findOrder(
@@ -54,7 +58,7 @@ async function findOrder(
 ): Promise<OrderRow> {
   const order = await getD1()
     .prepare(
-      `SELECT id, number, status, asset_id AS assetId FROM work_orders
+      `SELECT id, number, status, asset_id AS assetId, functional_location_id AS functionalLocationId FROM work_orders
        WHERE number = ? AND organization_id = ? AND site_id = ? LIMIT 1`,
     )
     .bind(number, context.session.organizationId, context.session.siteId)
@@ -66,6 +70,7 @@ async function findOrder(
       "La orden no existe en el centro activo.",
     );
   }
+  await assertLocationScope(context.session, order.functionalLocationId);
   if (["CLOSED", "CANCELLED"].includes(order.status)) {
     throw new ApiContractError(
       409,
@@ -84,10 +89,12 @@ async function findStockPart(
     .prepare(
       `SELECT part.id AS partId, part.sku, part.name AS partName, part.unit,
         stock.id AS stockId, stock.version AS stockVersion, stock.bin_id AS binId,
+        bin.warehouse_id AS warehouseId,
         stock.on_hand AS onHand, stock.reserved AS reservedStock,
         stock.on_order AS onOrder, policy.average_cost AS unitCost
        FROM parts part
        INNER JOIN stock_levels stock ON stock.part_id = part.id AND stock.site_id = ?
+       INNER JOIN warehouse_bins bin ON bin.id = stock.bin_id
        INNER JOIN part_site_policies policy ON policy.part_id = part.id AND policy.site_id = stock.site_id
        WHERE part.id = ? AND part.organization_id = ? AND part.status = 'ACTIVE'
        LIMIT 1`,
@@ -101,6 +108,7 @@ async function findStockPart(
       "El recambio no existe en el almacén del centro activo.",
     );
   }
+  assertWarehouseScope(context.session, row.warehouseId);
   return row;
 }
 
@@ -118,16 +126,14 @@ async function findMaterial(
         material.returned_quantity AS returned,
         part.id AS partId, part.sku, part.name AS partName, part.unit,
         stock.id AS stockId, stock.version AS stockVersion, stock.bin_id AS binId,
+        bin.warehouse_id AS warehouseId,
         stock.on_hand AS onHand, stock.reserved AS reservedStock,
-        stock.on_order AS onOrder, policy.average_cost AS unitCost,
-        (SELECT usage.unit_cost_snapshot FROM work_order_part_usages usage
-          WHERE usage.work_order_id = material.work_order_id
-            AND usage.part_id = material.part_id AND usage.usage_type = 'CONSUMPTION'
-          ORDER BY usage.created_at DESC LIMIT 1) AS historicalUnitCost
+        stock.on_order AS onOrder, policy.average_cost AS unitCost
        FROM work_order_materials material
        INNER JOIN parts part ON part.id = material.part_id
        INNER JOIN stock_levels stock ON stock.part_id = part.id
          AND stock.bin_id = material.bin_id AND stock.site_id = ?
+       INNER JOIN warehouse_bins bin ON bin.id = stock.bin_id
        INNER JOIN part_site_policies policy ON policy.part_id = part.id AND policy.site_id = stock.site_id
        WHERE material.id = ? AND material.work_order_id = ? LIMIT 1`,
     )
@@ -140,6 +146,7 @@ async function findMaterial(
       "El material no está previsto en esta orden.",
     );
   }
+  assertWarehouseScope(context.session, row.warehouseId);
   return row;
 }
 
@@ -367,81 +374,85 @@ export async function reserveMaterial(
   const materialVersion = material.materialVersion + 1;
   const movementId = operationId("movement");
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE stock_levels SET reserved = reserved + ?, version = version + 1, updated_at = ?
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE stock_levels SET reserved = reserved + ?, version = version + 1, updated_at = ?
          WHERE id = ? AND site_id = ? AND version = ? AND on_hand - reserved >= ?
            AND EXISTS (SELECT 1 FROM work_order_materials WHERE id = ? AND version = ?)`,
-      )
-      .bind(
-        quantity,
-        now,
-        material.stockId,
-        context.session.siteId,
-        material.stockVersion,
-        quantity,
-        material.materialId,
-        material.materialVersion,
-      ),
-    db
-      .prepare(
-        `UPDATE work_order_materials SET reserved_quantity = reserved_quantity + ?,
+        )
+        .bind(
+          quantity,
+          now,
+          material.stockId,
+          context.session.siteId,
+          material.stockVersion,
+          quantity,
+          material.materialId,
+          material.materialVersion,
+        ),
+      db
+        .prepare(
+          `UPDATE work_order_materials SET reserved_quantity = reserved_quantity + ?,
           version = version + 1, updated_at = ?
          WHERE id = ? AND version = ?
            AND EXISTS (SELECT 1 FROM stock_levels WHERE id = ? AND version = ?)`,
-      )
-      .bind(
-        quantity,
-        now,
-        material.materialId,
-        material.materialVersion,
-        material.stockId,
-        stockVersion,
-      ),
-    db
-      .prepare(
-        `INSERT INTO inventory_movements
+        )
+        .bind(
+          quantity,
+          now,
+          material.materialId,
+          material.materialVersion,
+          material.stockId,
+          stockVersion,
+        ),
+      db
+        .prepare(
+          `INSERT INTO inventory_movements
           (id, organization_id, site_id, part_id, bin_id, work_order_id,
            actor_id, movement_type, reference, reason, delta_on_hand,
            delta_reserved, delta_on_order, unit_cost, occurred_at, created_at)
          SELECT ?, ?, ?, part_id, bin_id, work_order_id, ?, 'RESERVE', ?,
            'Reserva para orden de trabajo', 0, ?, 0, ?, ?, ?
          FROM work_order_materials WHERE id = ? AND version = ?`,
-      )
-      .bind(
-        movementId,
-        context.session.organizationId,
-        context.session.siteId,
-        context.session.userId,
-        order.number,
-        quantity,
-        material.unitCost,
-        now,
-        now,
-        material.materialId,
+        )
+        .bind(
+          movementId,
+          context.session.organizationId,
+          context.session.siteId,
+          context.session.userId,
+          order.number,
+          quantity,
+          material.unitCost,
+          now,
+          now,
+          material.materialId,
+          materialVersion,
+        ),
+      materialEvent(db, context, {
+        orderId: order.id,
+        materialId: material.materialId,
         materialVersion,
-      ),
-    materialEvent(db, context, {
-      orderId: order.id,
-      materialId: material.materialId,
-      materialVersion,
-      eventType: "PART_RESERVED",
-      note: `${material.sku} × ${quantity} ${material.unit} reservado.`,
-      now,
-    }),
-    materialAudit(db, context, {
-      action: "PART_RESERVED",
-      materialId: material.materialId,
-      materialVersion,
-      previousValue: { reserved: material.reservedForOrder },
-      newValue: {
-        reserved: Number(material.reservedForOrder) + quantity,
-        movementId,
-      },
-      now,
-    }),
-  ]);
+        eventType: "PART_RESERVED",
+        note: `${material.sku} × ${quantity} ${material.unit} reservado.`,
+        now,
+      }),
+      materialAudit(db, context, {
+        action: "PART_RESERVED",
+        materialId: material.materialId,
+        materialVersion,
+        previousValue: { reserved: material.reservedForOrder },
+        newValue: {
+          reserved: Number(material.reservedForOrder) + quantity,
+          movementId,
+        },
+        now,
+      }),
+    ],
+    [0, 1],
+  );
   assertMutationApplied(
     results[0],
     "El stock disponible cambió. Actualiza antes de reservar.",
@@ -464,83 +475,87 @@ export async function releaseMaterial(
   const materialVersion = material.materialVersion + 1;
   const movementId = operationId("movement");
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE stock_levels SET reserved = reserved - ?, version = version + 1, updated_at = ?
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE stock_levels SET reserved = reserved - ?, version = version + 1, updated_at = ?
          WHERE id = ? AND site_id = ? AND version = ? AND reserved >= ?
            AND EXISTS (SELECT 1 FROM work_order_materials WHERE id = ? AND version = ? AND reserved_quantity >= ?)`,
-      )
-      .bind(
-        quantity,
-        now,
-        material.stockId,
-        context.session.siteId,
-        material.stockVersion,
-        quantity,
-        material.materialId,
-        material.materialVersion,
-        quantity,
-      ),
-    db
-      .prepare(
-        `UPDATE work_order_materials SET reserved_quantity = reserved_quantity - ?,
+        )
+        .bind(
+          quantity,
+          now,
+          material.stockId,
+          context.session.siteId,
+          material.stockVersion,
+          quantity,
+          material.materialId,
+          material.materialVersion,
+          quantity,
+        ),
+      db
+        .prepare(
+          `UPDATE work_order_materials SET reserved_quantity = reserved_quantity - ?,
           version = version + 1, updated_at = ?
          WHERE id = ? AND version = ? AND reserved_quantity >= ?
            AND EXISTS (SELECT 1 FROM stock_levels WHERE id = ? AND version = ?)`,
-      )
-      .bind(
-        quantity,
-        now,
-        material.materialId,
-        material.materialVersion,
-        quantity,
-        material.stockId,
-        stockVersion,
-      ),
-    db
-      .prepare(
-        `INSERT INTO inventory_movements
+        )
+        .bind(
+          quantity,
+          now,
+          material.materialId,
+          material.materialVersion,
+          quantity,
+          material.stockId,
+          stockVersion,
+        ),
+      db
+        .prepare(
+          `INSERT INTO inventory_movements
           (id, organization_id, site_id, part_id, bin_id, work_order_id,
            actor_id, movement_type, reference, reason, delta_on_hand,
            delta_reserved, delta_on_order, unit_cost, occurred_at, created_at)
          SELECT ?, ?, ?, part_id, bin_id, work_order_id, ?, 'RELEASE', ?,
            'Liberación de reserva de orden', 0, ?, 0, ?, ?, ?
          FROM work_order_materials WHERE id = ? AND version = ?`,
-      )
-      .bind(
-        movementId,
-        context.session.organizationId,
-        context.session.siteId,
-        context.session.userId,
-        order.number,
-        -quantity,
-        material.unitCost,
-        now,
-        now,
-        material.materialId,
+        )
+        .bind(
+          movementId,
+          context.session.organizationId,
+          context.session.siteId,
+          context.session.userId,
+          order.number,
+          -quantity,
+          material.unitCost,
+          now,
+          now,
+          material.materialId,
+          materialVersion,
+        ),
+      materialEvent(db, context, {
+        orderId: order.id,
+        materialId: material.materialId,
         materialVersion,
-      ),
-    materialEvent(db, context, {
-      orderId: order.id,
-      materialId: material.materialId,
-      materialVersion,
-      eventType: "PART_RELEASED",
-      note: `${material.sku} × ${quantity} ${material.unit} liberado.`,
-      now,
-    }),
-    materialAudit(db, context, {
-      action: "PART_RELEASED",
-      materialId: material.materialId,
-      materialVersion,
-      previousValue: { reserved: material.reservedForOrder },
-      newValue: {
-        reserved: Number(material.reservedForOrder) - quantity,
-        movementId,
-      },
-      now,
-    }),
-  ]);
+        eventType: "PART_RELEASED",
+        note: `${material.sku} × ${quantity} ${material.unit} liberado.`,
+        now,
+      }),
+      materialAudit(db, context, {
+        action: "PART_RELEASED",
+        materialId: material.materialId,
+        materialVersion,
+        previousValue: { reserved: material.reservedForOrder },
+        newValue: {
+          reserved: Number(material.reservedForOrder) - quantity,
+          movementId,
+        },
+        now,
+      }),
+    ],
+    [0, 1],
+  );
   assertMutationApplied(results[0]);
   assertMutationApplied(results[1]);
 }
@@ -571,117 +586,121 @@ export async function consumeMaterial(
   const movementId = operationId("movement");
   const usageId = operationId("usage");
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE stock_levels SET on_hand = on_hand - ?, reserved = reserved - ?,
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE stock_levels SET on_hand = on_hand - ?, reserved = reserved - ?,
           version = version + 1, updated_at = ?
          WHERE id = ? AND site_id = ? AND version = ?
            AND on_hand >= ? AND reserved >= ? AND on_hand - ? >= reserved - ?
            AND EXISTS (SELECT 1 FROM work_order_materials
              WHERE id = ? AND version = ? AND reserved_quantity >= ?)`,
-      )
-      .bind(
-        quantity,
-        reservedUsed,
-        now,
-        material.stockId,
-        context.session.siteId,
-        material.stockVersion,
-        quantity,
-        reservedUsed,
-        quantity,
-        reservedUsed,
-        material.materialId,
-        material.materialVersion,
-        reservedUsed,
-      ),
-    db
-      .prepare(
-        `UPDATE work_order_materials SET reserved_quantity = reserved_quantity - ?,
+        )
+        .bind(
+          quantity,
+          reservedUsed,
+          now,
+          material.stockId,
+          context.session.siteId,
+          material.stockVersion,
+          quantity,
+          reservedUsed,
+          quantity,
+          reservedUsed,
+          material.materialId,
+          material.materialVersion,
+          reservedUsed,
+        ),
+      db
+        .prepare(
+          `UPDATE work_order_materials SET reserved_quantity = reserved_quantity - ?,
           consumed_quantity = consumed_quantity + ?, version = version + 1, updated_at = ?
          WHERE id = ? AND version = ? AND reserved_quantity >= ?
            AND EXISTS (SELECT 1 FROM stock_levels WHERE id = ? AND version = ?)`,
-      )
-      .bind(
-        reservedUsed,
-        quantity,
-        now,
-        material.materialId,
-        material.materialVersion,
-        reservedUsed,
-        material.stockId,
-        stockVersion,
-      ),
-    db
-      .prepare(
-        `INSERT INTO inventory_movements
+        )
+        .bind(
+          reservedUsed,
+          quantity,
+          now,
+          material.materialId,
+          material.materialVersion,
+          reservedUsed,
+          material.stockId,
+          stockVersion,
+        ),
+      db
+        .prepare(
+          `INSERT INTO inventory_movements
           (id, organization_id, site_id, part_id, bin_id, work_order_id,
            actor_id, movement_type, reference, reason, delta_on_hand,
            delta_reserved, delta_on_order, unit_cost, occurred_at, created_at)
          SELECT ?, ?, ?, part_id, bin_id, work_order_id, ?, 'CONSUMPTION', ?,
            'Consumo documentado en intervención', ?, ?, 0, ?, ?, ?
          FROM work_order_materials WHERE id = ? AND version = ?`,
-      )
-      .bind(
-        movementId,
-        context.session.organizationId,
-        context.session.siteId,
-        context.session.userId,
-        order.number,
-        -quantity,
-        -reservedUsed,
-        material.unitCost,
-        now,
-        now,
-        material.materialId,
-        materialVersion,
-      ),
-    db
-      .prepare(
-        `INSERT INTO work_order_part_usages
+        )
+        .bind(
+          movementId,
+          context.session.organizationId,
+          context.session.siteId,
+          context.session.userId,
+          order.number,
+          -quantity,
+          -reservedUsed,
+          material.unitCost,
+          now,
+          now,
+          material.materialId,
+          materialVersion,
+        ),
+      db
+        .prepare(
+          `INSERT INTO work_order_part_usages
           (id, work_order_id, part_id, movement_id, usage_type, quantity,
            unit_cost_snapshot, total_cost, created_at)
          SELECT ?, work_order_id, part_id, ?, 'CONSUMPTION', ?, ?, ?, ?
          FROM work_order_materials WHERE id = ? AND version = ?
            AND EXISTS (SELECT 1 FROM inventory_movements WHERE id = ?)`,
-      )
-      .bind(
-        usageId,
-        movementId,
-        quantity,
-        material.unitCost,
-        quantity * material.unitCost,
-        now,
-        material.materialId,
+        )
+        .bind(
+          usageId,
+          movementId,
+          quantity,
+          material.unitCost,
+          quantity * material.unitCost,
+          now,
+          material.materialId,
+          materialVersion,
+          movementId,
+        ),
+      materialEvent(db, context, {
+        orderId: order.id,
+        materialId: material.materialId,
         materialVersion,
-        movementId,
-      ),
-    materialEvent(db, context, {
-      orderId: order.id,
-      materialId: material.materialId,
-      materialVersion,
-      eventType: "PART_CONSUMED",
-      note: `${material.sku} × ${quantity} ${material.unit} consumido.`,
-      now,
-    }),
-    materialAudit(db, context, {
-      action: "PART_CONSUMED",
-      materialId: material.materialId,
-      materialVersion,
-      previousValue: {
-        onHand: material.onHand,
-        reservedForOrder: material.reservedForOrder,
-      },
-      newValue: {
-        onHand: Number(material.onHand) - quantity,
-        reservedForOrder: Number(material.reservedForOrder) - reservedUsed,
-        movementId,
-        unitCostSnapshot: material.unitCost,
-      },
-      now,
-    }),
-  ]);
+        eventType: "PART_CONSUMED",
+        note: `${material.sku} × ${quantity} ${material.unit} consumido.`,
+        now,
+      }),
+      materialAudit(db, context, {
+        action: "PART_CONSUMED",
+        materialId: material.materialId,
+        materialVersion,
+        previousValue: {
+          onHand: material.onHand,
+          reservedForOrder: material.reservedForOrder,
+        },
+        newValue: {
+          onHand: Number(material.onHand) - quantity,
+          reservedForOrder: Number(material.reservedForOrder) - reservedUsed,
+          movementId,
+          unitCostSnapshot: material.unitCost,
+        },
+        now,
+      }),
+    ],
+    [0, 1],
+  );
   assertMutationApplied(
     results[0],
     "El stock cambió antes de registrar el consumo.",
@@ -707,105 +726,141 @@ export async function returnMaterial(
   const now = operationNow(context);
   const stockVersion = material.stockVersion + 1;
   const materialVersion = material.materialVersion + 1;
-  const unitCost = Number(material.historicalUnitCost ?? material.unitCost);
+  // Weighted historical pool for this WO / SKU / bin, never today's SKU price.
+  // The immutable audit records every source usage and prior return in the pool.
+  const valuation = await getD1()
+    .prepare(
+      `SELECT SUM(usage.total_cost) AS cost,
+    SUM(CASE WHEN usage.usage_type = 'CONSUMPTION' THEN usage.quantity ELSE -usage.quantity END) AS quantity,
+    json_group_array(json_object('usageId',usage.id,'type',usage.usage_type,'quantity',usage.quantity,'cost',usage.total_cost)) AS entries
+    FROM work_order_part_usages usage INNER JOIN inventory_movements movement ON movement.id = usage.movement_id
+    WHERE usage.work_order_id = ? AND usage.part_id = ? AND movement.bin_id = ?`,
+    )
+    .bind(order.id, material.partId, material.binId)
+    .first<{ cost: number | null; quantity: number | null; entries: string }>();
+  if (
+    valuation?.cost == null ||
+    valuation.quantity == null ||
+    valuation.cost < -0.000001 ||
+    valuation.quantity <= 0 ||
+    Math.abs(valuation.quantity - (material.consumed - material.returned)) >
+      0.000001
+  ) {
+    throw new ApiContractError(
+      409,
+      "HISTORICAL_COST_UNAVAILABLE",
+      "El consumo histórico no cuadra con la cantidad pendiente. Requiere revisión, no revaloración automática.",
+    );
+  }
+  const unitCost = Math.max(0, valuation.cost) / valuation.quantity;
   const movementId = operationId("movement");
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE stock_levels SET on_hand = on_hand + ?, version = version + 1, updated_at = ?
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE stock_levels SET on_hand = on_hand + ?, version = version + 1, updated_at = ?
          WHERE id = ? AND site_id = ? AND version = ?
            AND EXISTS (SELECT 1 FROM work_order_materials
              WHERE id = ? AND version = ? AND consumed_quantity - returned_quantity >= ?)`,
-      )
-      .bind(
-        quantity,
-        now,
-        material.stockId,
-        context.session.siteId,
-        material.stockVersion,
-        material.materialId,
-        material.materialVersion,
-        quantity,
-      ),
-    db
-      .prepare(
-        `UPDATE work_order_materials SET returned_quantity = returned_quantity + ?,
+        )
+        .bind(
+          quantity,
+          now,
+          material.stockId,
+          context.session.siteId,
+          material.stockVersion,
+          material.materialId,
+          material.materialVersion,
+          quantity,
+        ),
+      db
+        .prepare(
+          `UPDATE work_order_materials SET returned_quantity = returned_quantity + ?,
           version = version + 1, updated_at = ?
          WHERE id = ? AND version = ? AND consumed_quantity - returned_quantity >= ?
            AND EXISTS (SELECT 1 FROM stock_levels WHERE id = ? AND version = ?)`,
-      )
-      .bind(
-        quantity,
-        now,
-        material.materialId,
-        material.materialVersion,
-        quantity,
-        material.stockId,
-        stockVersion,
-      ),
-    db
-      .prepare(
-        `INSERT INTO inventory_movements
+        )
+        .bind(
+          quantity,
+          now,
+          material.materialId,
+          material.materialVersion,
+          quantity,
+          material.stockId,
+          stockVersion,
+        ),
+      db
+        .prepare(
+          `INSERT INTO inventory_movements
           (id, organization_id, site_id, part_id, bin_id, work_order_id,
            actor_id, movement_type, reference, reason, delta_on_hand,
            delta_reserved, delta_on_order, unit_cost, occurred_at, created_at)
          SELECT ?, ?, ?, part_id, bin_id, work_order_id, ?, 'RETURN', ?,
            'Devolución de material no utilizado', ?, 0, 0, ?, ?, ?
          FROM work_order_materials WHERE id = ? AND version = ?`,
-      )
-      .bind(
-        movementId,
-        context.session.organizationId,
-        context.session.siteId,
-        context.session.userId,
-        order.number,
-        quantity,
-        unitCost,
-        now,
-        now,
-        material.materialId,
-        materialVersion,
-      ),
-    db
-      .prepare(
-        `INSERT INTO work_order_part_usages
+        )
+        .bind(
+          movementId,
+          context.session.organizationId,
+          context.session.siteId,
+          context.session.userId,
+          order.number,
+          quantity,
+          unitCost,
+          now,
+          now,
+          material.materialId,
+          materialVersion,
+        ),
+      db
+        .prepare(
+          `INSERT INTO work_order_part_usages
           (id, work_order_id, part_id, movement_id, usage_type, quantity,
            unit_cost_snapshot, total_cost, created_at)
          SELECT ?, work_order_id, part_id, ?, 'RETURN', ?, ?, ?, ?
          FROM work_order_materials WHERE id = ? AND version = ?`,
-      )
-      .bind(
-        operationId("usage"),
-        movementId,
-        quantity,
-        unitCost,
-        -quantity * unitCost,
-        now,
-        material.materialId,
+        )
+        .bind(
+          operationId("usage"),
+          movementId,
+          quantity,
+          unitCost,
+          -quantity * unitCost,
+          now,
+          material.materialId,
+          materialVersion,
+        ),
+      materialEvent(db, context, {
+        orderId: order.id,
+        materialId: material.materialId,
         materialVersion,
-      ),
-    materialEvent(db, context, {
-      orderId: order.id,
-      materialId: material.materialId,
-      materialVersion,
-      eventType: "PART_RETURNED",
-      note: `${material.sku} × ${quantity} ${material.unit} devuelto al almacén.`,
-      now,
-    }),
-    materialAudit(db, context, {
-      action: "PART_RETURNED",
-      materialId: material.materialId,
-      materialVersion,
-      previousValue: { returned: material.returned },
-      newValue: {
-        returned: Number(material.returned) + quantity,
-        movementId,
-        unitCostSnapshot: unitCost,
-      },
-      now,
-    }),
-  ]);
+        eventType: "PART_RETURNED",
+        note: `${material.sku} × ${quantity} ${material.unit} devuelto al almacén.`,
+        now,
+      }),
+      materialAudit(db, context, {
+        action: "PART_RETURNED",
+        materialId: material.materialId,
+        materialVersion,
+        previousValue: { returned: material.returned },
+        newValue: {
+          returned: Number(material.returned) + quantity,
+          movementId,
+          unitCostSnapshot: unitCost,
+          valuationBasis: {
+            policy: "WEIGHTED_OUTSTANDING_WO_PART_BIN",
+            quantity: valuation.quantity,
+            cost: valuation.cost,
+            entries: JSON.parse(valuation.entries) as unknown,
+          },
+        },
+        now,
+      }),
+    ],
+    [0, 1],
+  );
   assertMutationApplied(results[0]);
   assertMutationApplied(results[1]);
 }

@@ -4,7 +4,8 @@ import {
   type CriticalSpareRisk,
 } from "@/lib/domain/procurement";
 import type { TenantScope } from "./shared";
-import { queryAll, queryFirst, warehouseScopePredicate } from "./shared";
+import { queryAll, warehouseScopePredicate } from "./shared";
+import { scopedQueries } from "./scoped-queries";
 
 export type ProcurementRequisitionRow = {
   id: string;
@@ -122,6 +123,7 @@ export type ProcurementCenterData = {
 export async function getProcurementCenter(
   scope: TenantScope,
 ): Promise<ProcurementCenterData> {
+  const { queryAll, queryFirst } = scopedQueries(scope);
   const now = new Date().toISOString();
   const ninetyDaysAgo = new Date(Date.now() - 90 * 86_400_000).toISOString();
   const warehouseScope = warehouseScopePredicate(scope, "warehouse.id");
@@ -177,35 +179,35 @@ export async function getProcurementCenter(
   ] = await Promise.all([
     queryFirst<ProcurementCenterData["summary"]>(
       `SELECT
-          (SELECT COUNT(*) FROM purchase_requisitions requisition WHERE requisition.site_id = ?
+          (SELECT COUNT(*) FROM scope_purchase_requisitions requisition WHERE requisition.site_id = ?
             AND requisition.status IN ('DRAFT','SUBMITTED','APPROVED')
             AND ${requisitionSummaryScope.sql}) AS pendingRequisitions,
-          (SELECT COUNT(*) FROM purchase_requisitions requisition WHERE requisition.site_id = ?
+          (SELECT COUNT(*) FROM scope_purchase_requisitions requisition WHERE requisition.site_id = ?
             AND requisition.status = 'SUBMITTED'
             AND ${requisitionSummaryScope.sql}) AS pendingApproval,
-          (SELECT COUNT(*) FROM purchase_orders purchase_order WHERE purchase_order.site_id = ?
+          (SELECT COUNT(*) FROM scope_purchase_orders purchase_order WHERE purchase_order.site_id = ?
             AND purchase_order.status IN ('DRAFT','APPROVED','SENT','PARTIALLY_RECEIVED')
             AND ${orderSummaryScope.sql}) AS openOrders,
-          (SELECT COUNT(*) FROM purchase_orders purchase_order WHERE purchase_order.site_id = ?
+          (SELECT COUNT(*) FROM scope_purchase_orders purchase_order WHERE purchase_order.site_id = ?
             AND purchase_order.status IN ('SENT','PARTIALLY_RECEIVED')
             AND purchase_order.expected_at < ? AND ${orderSummaryScope.sql}) AS delayedOrders,
-          (SELECT COUNT(*) FROM purchase_orders purchase_order WHERE purchase_order.site_id = ?
+          (SELECT COUNT(*) FROM scope_purchase_orders purchase_order WHERE purchase_order.site_id = ?
             AND purchase_order.status = 'PARTIALLY_RECEIVED'
             AND ${orderSummaryScope.sql}) AS partialReceipts,
           (SELECT COUNT(*) FROM part_site_policies policy
             WHERE policy.site_id = ? AND policy.critical = 1
               AND COALESCE((SELECT SUM(stock.on_hand - stock.reserved)
-                FROM stock_levels stock
+                FROM scope_stock_levels stock
                 INNER JOIN warehouse_bins stock_bin ON stock_bin.id = stock.bin_id
                 WHERE stock.part_id = policy.part_id
                   AND stock.site_id = policy.site_id
                   AND ${stockWarehouseScope.sql}), 0) <= 0) AS criticalStockouts,
-          (SELECT COUNT(DISTINCT work_order.id) FROM work_orders work_order
+          (SELECT COUNT(DISTINCT work_order.id) FROM scope_work_orders work_order
             INNER JOIN work_order_materials material ON material.work_order_id = work_order.id
             INNER JOIN warehouse_bins material_bin ON material_bin.id = material.bin_id
             WHERE work_order.site_id = ? AND work_order.status = 'WAITING_PART'
               AND ${waitingSummaryScope.sql}) AS waitingWorkOrders,
-          (SELECT COALESCE(SUM(receipt.total_cost), 0) FROM goods_receipts receipt
+          (SELECT COALESCE(SUM(receipt.total_cost), 0) FROM scope_goods_receipts receipt
             WHERE receipt.site_id = ? AND receipt.received_at >= ?
               AND ${receiptSummaryScope.sql}) AS recentSpend`,
       [
@@ -237,13 +239,13 @@ export async function getProcurementCenter(
           warehouse.name AS warehouseName, wo.number AS workOrderNumber,
           COUNT(line.id) AS lineCount,
           GROUP_CONCAT(part.sku || ' × ' || line.quantity, ', ') AS itemSummary
-         FROM purchase_requisitions requisition
+         FROM scope_purchase_requisitions requisition
          INNER JOIN users requester ON requester.id = requisition.requested_by_id
          INNER JOIN warehouses warehouse ON warehouse.id = requisition.warehouse_id
          INNER JOIN purchase_requisition_lines line
            ON line.purchase_requisition_id = requisition.id
          INNER JOIN parts part ON part.id = line.part_id
-         LEFT JOIN work_orders wo ON wo.id = requisition.work_order_id
+         LEFT JOIN scope_work_orders wo ON wo.id = requisition.work_order_id
          WHERE requisition.organization_id = ? AND requisition.site_id = ?
            AND ${warehouseScope.sql}
          GROUP BY requisition.id
@@ -260,10 +262,10 @@ export async function getProcurementCenter(
           warehouse.name AS warehouseName, requisition.number AS requisitionNumber,
           COALESCE(SUM(line.ordered_quantity), 0) AS orderedQuantity,
           COALESCE(SUM(line.received_quantity), 0) AS receivedQuantity
-         FROM purchase_orders po
+         FROM scope_purchase_orders po
          INNER JOIN vendors vendor ON vendor.id = po.vendor_id
          INNER JOIN warehouses warehouse ON warehouse.id = po.warehouse_id
-         INNER JOIN purchase_requisitions requisition ON requisition.id = po.requisition_id
+         INNER JOIN scope_purchase_requisitions requisition ON requisition.id = po.requisition_id
          INNER JOIN purchase_order_lines line ON line.purchase_order_id = po.id
          WHERE po.organization_id = ? AND po.site_id = ?
            AND ${warehouseScope.sql}
@@ -284,20 +286,20 @@ export async function getProcurementCenter(
             WHERE substitute.part_id = part.id AND substitute.approval_status = 'APPROVED') AS approvedSubstitutes,
           COALESCE((SELECT SUM(MAX(material.planned_quantity - material.reserved_quantity - material.consumed_quantity, 0))
             FROM work_order_materials material
-            INNER JOIN work_orders wo ON wo.id = material.work_order_id
+            INNER JOIN scope_work_orders wo ON wo.id = material.work_order_id
             INNER JOIN warehouse_bins demand_bin ON demand_bin.id = material.bin_id
             WHERE material.part_id = part.id AND wo.site_id = policy.site_id
               AND ${demandWarehouseScope.sql}
               AND wo.status IN ('REQUESTED','TRIAGE','APPROVED','PLANNED','SCHEDULED','ASSIGNED','IN_PROGRESS','PAUSED','WAITING_PART','WAITING_VENDOR')), 0) AS openDemand,
           (SELECT COUNT(DISTINCT wo.id) FROM work_order_materials material
-            INNER JOIN work_orders wo ON wo.id = material.work_order_id
+            INNER JOIN scope_work_orders wo ON wo.id = material.work_order_id
             INNER JOIN warehouse_bins waiting_bin ON waiting_bin.id = material.bin_id
             WHERE material.part_id = part.id AND wo.site_id = policy.site_id
               AND ${waitingWarehouseScope.sql}
               AND wo.status = 'WAITING_PART') AS waitingWorkOrders
          FROM parts part
          INNER JOIN part_site_policies policy ON policy.part_id = part.id AND policy.site_id = ?
-         LEFT JOIN stock_levels stock ON stock.part_id = part.id
+         LEFT JOIN scope_stock_levels stock ON stock.part_id = part.id
            AND stock.site_id = policy.site_id AND EXISTS (
              SELECT 1 FROM warehouse_bins stock_bin WHERE stock_bin.id = stock.bin_id
                AND ${stockWarehouseScope.sql}
@@ -307,10 +309,10 @@ export async function getProcurementCenter(
          HAVING available <= policy.reorder_point OR waitingWorkOrders > 0
          ORDER BY policy.critical DESC, available ASC, policy.lead_time_days DESC LIMIT 40`,
       [
-        scope.siteId,
-        ...stockWarehouseScope.params,
         ...demandWarehouseScope.params,
         ...waitingWarehouseScope.params,
+        scope.siteId,
+        ...stockWarehouseScope.params,
         scope.organizationId,
       ],
     ),
@@ -346,7 +348,7 @@ export async function getProcurementCenter(
           policy.max_stock AS maxStock, policy.reorder_point AS reorderPoint
          FROM parts part
          INNER JOIN part_site_policies policy ON policy.part_id = part.id AND policy.site_id = ?
-         LEFT JOIN stock_levels stock ON stock.part_id = part.id
+         LEFT JOIN scope_stock_levels stock ON stock.part_id = part.id
            AND stock.site_id = policy.site_id AND EXISTS (
              SELECT 1 FROM warehouse_bins stock_bin WHERE stock_bin.id = stock.bin_id
                AND ${stockWarehouseScope.sql}
@@ -365,14 +367,14 @@ export async function getProcurementCenter(
          FROM vendors vendor
          LEFT JOIN part_vendor_offers offer
            ON offer.vendor_id = vendor.id AND offer.status = 'ACTIVE'
-         LEFT JOIN purchase_orders po ON po.vendor_id = vendor.id
+         LEFT JOIN scope_purchase_orders po ON po.vendor_id = vendor.id
            AND po.site_id = ? AND ${vendorOrderScope.sql}
          WHERE vendor.organization_id = ? AND vendor.status = 'ACTIVE'
          GROUP BY vendor.id ORDER BY suppliedParts DESC, vendor.name`,
       [scope.siteId, ...vendorOrderScope.params, scope.organizationId],
     ),
     queryAll<ProcurementCenterData["warehouses"][number]>(
-      `SELECT id, code, name FROM warehouses
+      `SELECT id, code, name FROM warehouses warehouse
          WHERE organization_id = ? AND site_id = ? AND status = 'ACTIVE'
            AND ${warehouseScope.sql}
          ORDER BY code`,
@@ -500,6 +502,7 @@ export async function getRequisitionDetail(
   scope: TenantScope,
   number: string,
 ): Promise<RequisitionDetailData | null> {
+  const { queryAll, queryFirst } = scopedQueries(scope);
   const warehouseScope = warehouseScopePredicate(scope, "warehouse.id");
   const requisition = await queryFirst<
     ProcurementRequisitionRow & {
@@ -523,12 +526,12 @@ export async function getRequisitionDetail(
       requisition.approved_at AS approvedAt, approver.full_name AS approverName,
       requisition.decision_reason AS decisionReason,
       po.number AS purchaseOrderNumber
-     FROM purchase_requisitions requisition
+     FROM scope_purchase_requisitions requisition
      INNER JOIN users requester ON requester.id = requisition.requested_by_id
      INNER JOIN warehouses warehouse ON warehouse.id = requisition.warehouse_id
      LEFT JOIN users approver ON approver.id = requisition.approved_by_id
-     LEFT JOIN work_orders wo ON wo.id = requisition.work_order_id
-     LEFT JOIN purchase_orders po ON po.requisition_id = requisition.id
+     LEFT JOIN scope_work_orders wo ON wo.id = requisition.work_order_id
+     LEFT JOIN scope_purchase_orders po ON po.requisition_id = requisition.id
      WHERE requisition.organization_id = ? AND requisition.site_id = ?
        AND requisition.number = ? AND ${warehouseScope.sql} LIMIT 1`,
     [scope.organizationId, scope.siteId, number, ...warehouseScope.params],
@@ -539,11 +542,11 @@ export async function getRequisitionDetail(
       `SELECT line.id, line.part_id AS partId, part.sku, part.name, part.unit,
         line.quantity, line.available_snapshot AS availableSnapshot,
         line.on_order_snapshot AS onOrderSnapshot,
-        COALESCE((SELECT SUM(stock.on_hand - stock.reserved) FROM stock_levels stock
+        COALESCE((SELECT SUM(stock.on_hand - stock.reserved) FROM scope_stock_levels stock
           INNER JOIN warehouse_bins stock_bin ON stock_bin.id = stock.bin_id
           WHERE stock.part_id = part.id AND stock.site_id = ?
             AND stock_bin.warehouse_id = ?), 0) AS currentAvailable,
-        COALESCE((SELECT SUM(stock.on_order) FROM stock_levels stock
+        COALESCE((SELECT SUM(stock.on_order) FROM scope_stock_levels stock
           INNER JOIN warehouse_bins stock_bin ON stock_bin.id = stock.bin_id
           WHERE stock.part_id = part.id AND stock.site_id = ?
             AND stock_bin.warehouse_id = ?), 0) AS currentOnOrder
@@ -618,6 +621,7 @@ export async function getPurchaseOrderDetail(
   scope: TenantScope,
   number: string,
 ): Promise<PurchaseOrderDetailData | null> {
+  const { queryAll, queryFirst } = scopedQueries(scope);
   const warehouseScope = warehouseScopePredicate(scope, "warehouse.id");
   const order = await queryFirst<
     Omit<PurchaseOrderDetailData, "lines" | "receipts" | "events">
@@ -635,12 +639,12 @@ export async function getPurchaseOrderDetail(
         WHERE purchase_order_id = po.id), 0) AS orderedQuantity,
       COALESCE((SELECT SUM(received_quantity) FROM purchase_order_lines
         WHERE purchase_order_id = po.id), 0) AS receivedQuantity
-     FROM purchase_orders po
+     FROM scope_purchase_orders po
      INNER JOIN vendors vendor ON vendor.id = po.vendor_id
      INNER JOIN warehouses warehouse ON warehouse.id = po.warehouse_id
      INNER JOIN warehouse_bins bin ON bin.id = po.destination_bin_id
-     INNER JOIN purchase_requisitions requisition ON requisition.id = po.requisition_id
-     LEFT JOIN work_orders wo ON wo.id = requisition.work_order_id
+     INNER JOIN scope_purchase_requisitions requisition ON requisition.id = po.requisition_id
+     LEFT JOIN scope_work_orders wo ON wo.id = requisition.work_order_id
      WHERE po.organization_id = ? AND po.site_id = ? AND po.number = ?
        AND ${warehouseScope.sql} LIMIT 1`,
     [scope.organizationId, scope.siteId, number, ...warehouseScope.params],
@@ -664,7 +668,7 @@ export async function getPurchaseOrderDetail(
         receipt.received_at AS receivedAt, receiver.full_name AS receiverName,
         receipt.total_cost AS totalCost,
         GROUP_CONCAT(part.sku || ' × ' || line.quantity, ', ') AS itemSummary
-       FROM goods_receipts receipt
+       FROM scope_goods_receipts receipt
        INNER JOIN users receiver ON receiver.id = receipt.received_by_id
        INNER JOIN goods_receipt_lines line ON line.goods_receipt_id = receipt.id
        INNER JOIN parts part ON part.id = line.part_id

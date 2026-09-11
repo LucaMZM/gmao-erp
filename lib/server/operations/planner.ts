@@ -12,8 +12,10 @@ import {
 } from "@/lib/domain/work-orders";
 import { ensureDatabase } from "@/lib/server/database";
 import { ApiContractError } from "@/lib/server/http";
+import { findAssignableUser } from "./work-orders";
 import {
   assertMutationApplied,
+  assertLocationScope,
   jsonValue,
   operationId,
   operationNow,
@@ -28,6 +30,7 @@ type PlannerOrderRow = {
   estimatedMinutes: number;
   plannedStart: string | null;
   plannedEnd: string | null;
+  functionalLocationId: string;
 };
 
 function localDateTimeToIso(dateKey: string, time: string): string {
@@ -106,7 +109,8 @@ export async function movePlannerWork(
   const order = await db
     .prepare(
       `SELECT id, number, status, version, estimated_minutes AS estimatedMinutes,
-        planned_start AS plannedStart, planned_end AS plannedEnd
+        planned_start AS plannedStart, planned_end AS plannedEnd,
+        functional_location_id AS functionalLocationId
        FROM work_orders WHERE number = ? AND organization_id = ? AND site_id = ? LIMIT 1`,
     )
     .bind(number, context.session.organizationId, context.session.siteId)
@@ -118,6 +122,7 @@ export async function movePlannerWork(
       "La orden no existe en el centro activo.",
     );
   }
+  await assertLocationScope(context.session, order.functionalLocationId);
   if (order.version !== input.expectedVersion) {
     throw new ApiContractError(
       409,
@@ -158,6 +163,11 @@ export async function movePlannerWork(
   if (input.date) {
     let startTime = "08:00";
     if (input.technicianId) {
+      await findAssignableUser(
+        context.session,
+        input.technicianId,
+        order.functionalLocationId,
+      );
       const technician = await db
         .prepare(
           `SELECT user.id, user.full_name AS fullName, profile.shift_start AS shiftStart,

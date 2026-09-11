@@ -1,3 +1,4 @@
+import { tenantScope } from "@/lib/server/repositories/shared";
 import {
   Activity,
   AlertTriangle,
@@ -22,10 +23,7 @@ import { getOverview } from "@/lib/server/repositories/overview";
 
 export default async function OverviewPage() {
   const session = await requireDemoSession();
-  const data = await getOverview({
-    organizationId: session.organizationId,
-    siteId: session.siteId,
-  });
+  const data = await getOverview(tenantScope(session));
   const kpis = [
     {
       label: "Disponibilidad",

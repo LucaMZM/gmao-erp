@@ -11,6 +11,7 @@ import type { DemoUserSession } from "@/lib/server/auth";
 import { ensureDatabase } from "@/lib/server/database";
 import { ApiContractError } from "@/lib/server/http";
 import {
+  atomicBatch,
   assertMutationApplied,
   assertLocationScope,
   jsonValue,
@@ -71,7 +72,7 @@ async function findWorkOrder(
   return row;
 }
 
-async function findAssignableUser(
+export async function findAssignableUser(
   session: DemoUserSession,
   userId: string,
   functionalLocationId: string,
@@ -225,74 +226,78 @@ export async function assignTechnician(
   const now = operationNow(context);
   const nextVersion = order.version + 1;
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE work_orders SET status = ?, version = version + 1, updated_at = ?
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE work_orders SET status = ?, version = version + 1, updated_at = ?
          WHERE id = ? AND organization_id = ? AND site_id = ? AND status = ? AND version = ?`,
-      )
-      .bind(
-        nextStatus,
-        now,
-        order.id,
-        context.session.organizationId,
-        context.session.siteId,
-        order.status,
-        order.version,
-      ),
-    db
-      .prepare(
-        `INSERT INTO work_order_assignments
+        )
+        .bind(
+          nextStatus,
+          now,
+          order.id,
+          context.session.organizationId,
+          context.session.siteId,
+          order.status,
+          order.version,
+        ),
+      db
+        .prepare(
+          `INSERT INTO work_order_assignments
           (id, work_order_id, user_id, assignment_role, assigned_at, unassigned_at)
          SELECT ?, id, ?, 'TECHNICIAN', ?, NULL FROM work_orders WHERE id = ? AND version = ?
          ON CONFLICT(work_order_id, user_id) DO UPDATE SET
            assignment_role = 'TECHNICIAN', assigned_at = excluded.assigned_at, unassigned_at = NULL`,
-      )
-      .bind(
-        operationId("assignment"),
-        technician.id,
+        )
+        .bind(
+          operationId("assignment"),
+          technician.id,
+          now,
+          order.id,
+          nextVersion,
+        ),
+      eventStatement(db, context, {
+        orderId: order.id,
+        eventType: "WORK_ORDER_ASSIGNED",
+        fromStatus: order.status,
+        toStatus: nextStatus,
+        note: `${technician.fullName} asignado a la intervención.`,
+        expectedVersion: nextVersion,
         now,
-        order.id,
-        nextVersion,
-      ),
-    eventStatement(db, context, {
-      orderId: order.id,
-      eventType: "WORK_ORDER_ASSIGNED",
-      fromStatus: order.status,
-      toStatus: nextStatus,
-      note: `${technician.fullName} asignado a la intervención.`,
-      expectedVersion: nextVersion,
-      now,
-    }),
-    auditStatement(db, context, {
-      action: "WORK_ORDER_ASSIGNED",
-      orderId: order.id,
-      previousValue: { status: order.status },
-      newValue: { status: nextStatus, technicianId: technician.id },
-      expectedVersion: nextVersion,
-      now,
-    }),
-    db
-      .prepare(
-        `INSERT INTO notifications
+      }),
+      auditStatement(db, context, {
+        action: "WORK_ORDER_ASSIGNED",
+        orderId: order.id,
+        previousValue: { status: order.status },
+        newValue: { status: nextStatus, technicianId: technician.id },
+        expectedVersion: nextVersion,
+        now,
+      }),
+      db
+        .prepare(
+          `INSERT INTO notifications
           (id, organization_id, site_id, user_id, title, body, severity,
            entity_type, entity_id, read_at, created_at)
          SELECT ?, ?, ?, ?, ?, ?, ?, 'WORK_ORDER', id, NULL, ?
          FROM work_orders WHERE id = ? AND version = ? AND priority IN ('P1_EMERGENCY','P2_URGENT')`,
-      )
-      .bind(
-        operationId("notification"),
-        context.session.organizationId,
-        context.session.siteId,
-        technician.id,
-        "OT crítica asignada",
-        `${order.number} requiere atención prioritaria.`,
-        order.priority === "P1_EMERGENCY" ? "CRITICAL" : "WARNING",
-        now,
-        order.id,
-        nextVersion,
-      ),
-  ]);
+        )
+        .bind(
+          operationId("notification"),
+          context.session.organizationId,
+          context.session.siteId,
+          technician.id,
+          "OT crítica asignada",
+          `${order.number} requiere atención prioritaria.`,
+          order.priority === "P1_EMERGENCY" ? "CRITICAL" : "WARNING",
+          now,
+          order.id,
+          nextVersion,
+        ),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0]);
 }
 
@@ -333,42 +338,46 @@ export async function scheduleWorkOrder(
   const now = operationNow(context);
   const nextVersion = order.version + 1;
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE work_orders SET planned_start = ?, planned_end = ?, status = ?,
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE work_orders SET planned_start = ?, planned_end = ?, status = ?,
           version = version + 1, updated_at = ?
          WHERE id = ? AND organization_id = ? AND site_id = ? AND status = ? AND version = ?`,
-      )
-      .bind(
-        input.plannedStart,
-        input.plannedEnd,
-        nextStatus,
+        )
+        .bind(
+          input.plannedStart,
+          input.plannedEnd,
+          nextStatus,
+          now,
+          order.id,
+          context.session.organizationId,
+          context.session.siteId,
+          order.status,
+          order.version,
+        ),
+      eventStatement(db, context, {
+        orderId: order.id,
+        eventType: "WORK_ORDER_SCHEDULED",
+        fromStatus: order.status,
+        toStatus: nextStatus,
+        note: "Ventana de ejecución programada.",
+        expectedVersion: nextVersion,
         now,
-        order.id,
-        context.session.organizationId,
-        context.session.siteId,
-        order.status,
-        order.version,
-      ),
-    eventStatement(db, context, {
-      orderId: order.id,
-      eventType: "WORK_ORDER_SCHEDULED",
-      fromStatus: order.status,
-      toStatus: nextStatus,
-      note: "Ventana de ejecución programada.",
-      expectedVersion: nextVersion,
-      now,
-    }),
-    auditStatement(db, context, {
-      action: "WORK_ORDER_SCHEDULED",
-      orderId: order.id,
-      previousValue: { status: order.status },
-      newValue: { status: nextStatus, ...input },
-      expectedVersion: nextVersion,
-      now,
-    }),
-  ]);
+      }),
+      auditStatement(db, context, {
+        action: "WORK_ORDER_SCHEDULED",
+        orderId: order.id,
+        previousValue: { status: order.status },
+        newValue: { status: nextStatus, ...input },
+        expectedVersion: nextVersion,
+        now,
+      }),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0]);
 }
 
@@ -476,57 +485,61 @@ export async function startWork(
   const laborSessionId = operationId("labor");
   const laborRate = await resolveLaborRate(context.session, technician.id, now);
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE work_orders SET status = 'IN_PROGRESS', actual_start = COALESCE(actual_start, ?),
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE work_orders SET status = 'IN_PROGRESS', actual_start = COALESCE(actual_start, ?),
           version = version + 1, updated_at = ?
          WHERE id = ? AND organization_id = ? AND site_id = ? AND status = ? AND version = ?`,
-      )
-      .bind(
-        now,
-        now,
-        order.id,
-        context.session.organizationId,
-        context.session.siteId,
-        order.status,
-        order.version,
-      ),
-    db
-      .prepare(
-        `INSERT INTO labor_sessions
+        )
+        .bind(
+          now,
+          now,
+          order.id,
+          context.session.organizationId,
+          context.session.siteId,
+          order.status,
+          order.version,
+        ),
+      db
+        .prepare(
+          `INSERT INTO labor_sessions
           (id, work_order_id, user_id, started_at, ended_at, minutes, status, ended_by_id, note,
            hourly_rate_cents_snapshot, labor_cost_cents, currency_snapshot)
          SELECT ?, id, ?, ?, NULL, 0, 'ACTIVE', NULL, 'Sesión iniciada desde la orden.', ?, 0, ?
          FROM work_orders WHERE id = ? AND version = ?`,
-      )
-      .bind(
-        laborSessionId,
-        technician.id,
+        )
+        .bind(
+          laborSessionId,
+          technician.id,
+          now,
+          laborRate.hourlyRateCents,
+          laborRate.currency,
+          order.id,
+          nextVersion,
+        ),
+      eventStatement(db, context, {
+        orderId: order.id,
+        eventType: order.actualStart ? "WORK_RESUMED" : "WORK_STARTED",
+        fromStatus: order.status,
+        toStatus: "IN_PROGRESS",
+        note: `${technician.fullName} ha iniciado una sesión de trabajo.`,
+        expectedVersion: nextVersion,
         now,
-        laborRate.hourlyRateCents,
-        laborRate.currency,
-        order.id,
-        nextVersion,
-      ),
-    eventStatement(db, context, {
-      orderId: order.id,
-      eventType: order.actualStart ? "WORK_RESUMED" : "WORK_STARTED",
-      fromStatus: order.status,
-      toStatus: "IN_PROGRESS",
-      note: `${technician.fullName} ha iniciado una sesión de trabajo.`,
-      expectedVersion: nextVersion,
-      now,
-    }),
-    auditStatement(db, context, {
-      action: order.actualStart ? "WORK_RESUMED" : "WORK_STARTED",
-      orderId: order.id,
-      previousValue: { status: order.status },
-      newValue: { status: "IN_PROGRESS", technicianId: technician.id },
-      expectedVersion: nextVersion,
-      now,
-    }),
-  ]);
+      }),
+      auditStatement(db, context, {
+        action: order.actualStart ? "WORK_RESUMED" : "WORK_STARTED",
+        orderId: order.id,
+        previousValue: { status: order.status },
+        newValue: { status: "IN_PROGRESS", technicianId: technician.id },
+        expectedVersion: nextVersion,
+        now,
+      }),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0]);
   return { laborSessionId };
 }
@@ -574,57 +587,64 @@ async function endActiveLaborAndTransition(
         ? "WAITING_FOR_PART"
         : "WAITING_FOR_VENDOR";
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE work_orders SET status = ?, version = version + 1, updated_at = ?
-         WHERE id = ? AND organization_id = ? AND site_id = ? AND status = ? AND version = ?`,
-      )
-      .bind(
-        toStatus,
-        now,
-        order.id,
-        context.session.organizationId,
-        context.session.siteId,
-        order.status,
-        order.version,
-      ),
-    ...activeLabor.map((labor) =>
+  const results = await atomicBatch(
+    db,
+    [
       db
         .prepare(
-          `UPDATE labor_sessions SET ended_at = ?, minutes = ?, status = 'PAUSED', ended_by_id = ?,
+          `UPDATE work_orders SET status = ?, version = version + 1, updated_at = ?
+         WHERE id = ? AND organization_id = ? AND site_id = ? AND status = ? AND version = ?`,
+        )
+        .bind(
+          toStatus,
+          now,
+          order.id,
+          context.session.organizationId,
+          context.session.siteId,
+          order.status,
+          order.version,
+        ),
+      ...activeLabor.map((labor) =>
+        db
+          .prepare(
+            `UPDATE labor_sessions SET ended_at = ?, minutes = ?, status = 'PAUSED', ended_by_id = ?,
              labor_cost_cents = ROUND(? * COALESCE(hourly_rate_cents_snapshot, 0) / 60.0)
            WHERE id = ? AND ended_at IS NULL
              AND EXISTS (SELECT 1 FROM work_orders WHERE id = ? AND version = ?)`,
-        )
-        .bind(
-          now,
-          calculateLaborMinutes(labor.startedAt, now),
-          context.session.userId,
-          calculateLaborMinutes(labor.startedAt, now),
-          labor.id,
-          order.id,
-          nextVersion,
-        ),
-    ),
-    eventStatement(db, context, {
-      orderId: order.id,
-      eventType,
-      fromStatus: order.status,
-      toStatus,
-      note,
-      expectedVersion: nextVersion,
-      now,
-    }),
-    auditStatement(db, context, {
-      action: eventType,
-      orderId: order.id,
-      previousValue: { status: order.status, activeLabor: activeLabor.length },
-      newValue: { status: toStatus, activeLabor: 0 },
-      expectedVersion: nextVersion,
-      now,
-    }),
-  ]);
+          )
+          .bind(
+            now,
+            calculateLaborMinutes(labor.startedAt, now),
+            context.session.userId,
+            calculateLaborMinutes(labor.startedAt, now),
+            labor.id,
+            order.id,
+            nextVersion,
+          ),
+      ),
+      eventStatement(db, context, {
+        orderId: order.id,
+        eventType,
+        fromStatus: order.status,
+        toStatus,
+        note,
+        expectedVersion: nextVersion,
+        now,
+      }),
+      auditStatement(db, context, {
+        action: eventType,
+        orderId: order.id,
+        previousValue: {
+          status: order.status,
+          activeLabor: activeLabor.length,
+        },
+        newValue: { status: toStatus, activeLabor: 0 },
+        expectedVersion: nextVersion,
+        now,
+      }),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0]);
 }
 
@@ -691,32 +711,42 @@ export async function stopLaborSession(
   }
   const now = operationNow(context);
   const minutes = calculateLaborMinutes(labor.startedAt, now);
-  const result = await getD1()
-    .prepare(
-      `UPDATE labor_sessions SET ended_at = ?, minutes = ?, status = 'STOPPED', ended_by_id = ?,
+  const db = getD1();
+  await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE labor_sessions SET ended_at = ?, minutes = ?, status = 'STOPPED', ended_by_id = ?,
         labor_cost_cents = ROUND(? * COALESCE(hourly_rate_cents_snapshot, 0) / 60.0)
        WHERE id = ? AND work_order_id = ? AND ended_at IS NULL`,
-    )
-    .bind(now, minutes, context.session.userId, minutes, labor.id, order.id)
-    .run();
-  assertMutationApplied(result);
-  await getD1().batch([
-    eventStatement(getD1(), context, {
-      orderId: order.id,
-      eventType: "LABOR_SESSION_STOPPED",
-      note: "Sesión de trabajo finalizada.",
-      expectedVersion: order.version,
-      now,
-    }),
-    auditStatement(getD1(), context, {
-      action: "LABOR_SESSION_STOPPED",
-      orderId: order.id,
-      previousValue: { laborSessionId, active: true },
-      newValue: { laborSessionId, active: false, minutes },
-      expectedVersion: order.version,
-      now,
-    }),
-  ]);
+        )
+        .bind(
+          now,
+          minutes,
+          context.session.userId,
+          minutes,
+          labor.id,
+          order.id,
+        ),
+      eventStatement(getD1(), context, {
+        orderId: order.id,
+        eventType: "LABOR_SESSION_STOPPED",
+        note: "Sesión de trabajo finalizada.",
+        expectedVersion: order.version,
+        now,
+      }),
+      auditStatement(getD1(), context, {
+        action: "LABOR_SESSION_STOPPED",
+        orderId: order.id,
+        previousValue: { laborSessionId, active: true },
+        newValue: { laborSessionId, active: false, minutes },
+        expectedVersion: order.version,
+        now,
+      }),
+    ],
+    [0, 1, 2],
+  );
 }
 
 export async function completeWorkOrder(
@@ -760,50 +790,54 @@ export async function completeWorkOrder(
   const now = operationNow(context);
   const nextVersion = order.version + 1;
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE work_orders SET status = 'COMPLETED', diagnosis = ?, solution = ?,
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE work_orders SET status = 'COMPLETED', diagnosis = ?, solution = ?,
           failure_mode = ?, failure_cause = ?, actual_end = ?, completed_at = ?,
           version = version + 1, updated_at = ?
          WHERE id = ? AND organization_id = ? AND site_id = ? AND status = ? AND version = ?`,
-      )
-      .bind(
-        input.diagnosis,
-        input.solution,
-        input.failureMode ?? null,
-        input.failureCause ?? null,
+        )
+        .bind(
+          input.diagnosis,
+          input.solution,
+          input.failureMode ?? null,
+          input.failureCause ?? null,
+          now,
+          now,
+          now,
+          order.id,
+          context.session.organizationId,
+          context.session.siteId,
+          order.status,
+          order.version,
+        ),
+      eventStatement(db, context, {
+        orderId: order.id,
+        eventType: "WORK_COMPLETED",
+        fromStatus: order.status,
+        toStatus: "COMPLETED",
+        note: "Intervención completada con diagnóstico y resolución documentados.",
+        expectedVersion: nextVersion,
         now,
+      }),
+      auditStatement(db, context, {
+        action: "WORK_COMPLETED",
+        orderId: order.id,
+        previousValue: { status: order.status },
+        newValue: {
+          status: "COMPLETED",
+          diagnosis: input.diagnosis,
+          solution: input.solution,
+        },
+        expectedVersion: nextVersion,
         now,
-        now,
-        order.id,
-        context.session.organizationId,
-        context.session.siteId,
-        order.status,
-        order.version,
-      ),
-    eventStatement(db, context, {
-      orderId: order.id,
-      eventType: "WORK_COMPLETED",
-      fromStatus: order.status,
-      toStatus: "COMPLETED",
-      note: "Intervención completada con diagnóstico y resolución documentados.",
-      expectedVersion: nextVersion,
-      now,
-    }),
-    auditStatement(db, context, {
-      action: "WORK_COMPLETED",
-      orderId: order.id,
-      previousValue: { status: order.status },
-      newValue: {
-        status: "COMPLETED",
-        diagnosis: input.diagnosis,
-        solution: input.solution,
-      },
-      expectedVersion: nextVersion,
-      now,
-    }),
-  ]);
+      }),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0]);
 }
 
@@ -823,72 +857,76 @@ export async function closeWorkOrder(
   const now = operationNow(context);
   const nextVersion = order.version + 1;
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE work_orders SET status = 'CLOSED', closed_at = ?,
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE work_orders SET status = 'CLOSED', closed_at = ?,
           version = version + 1, updated_at = ?
          WHERE id = ? AND organization_id = ? AND site_id = ? AND status = 'COMPLETED' AND version = ?`,
-      )
-      .bind(
-        now,
-        now,
-        order.id,
-        context.session.organizationId,
-        context.session.siteId,
-        order.version,
-      ),
-    db
-      .prepare(
-        `UPDATE assets SET
+        )
+        .bind(
+          now,
+          now,
+          order.id,
+          context.session.organizationId,
+          context.session.siteId,
+          order.version,
+        ),
+      db
+        .prepare(
+          `UPDATE assets SET
           status = CASE WHEN status IN ('DOWN','DEGRADED','MAINTENANCE') THEN 'OPERATING' ELSE status END,
           health_score = MIN(100, health_score + CASE WHEN ? = 'CORRECTIVE' THEN 5 ELSE 2 END),
           updated_at = ?
          WHERE id = ? AND site_id = ? AND status != 'RETIRED'
            AND EXISTS (SELECT 1 FROM work_orders WHERE id = ? AND version = ?)`,
-      )
-      .bind(
-        order.type,
-        now,
-        order.assetId,
-        context.session.siteId,
-        order.id,
-        nextVersion,
-      ),
-    db
-      .prepare(
-        `UPDATE maintenance_plans SET last_executed_at = ?,
+        )
+        .bind(
+          order.type,
+          now,
+          order.assetId,
+          context.session.siteId,
+          order.id,
+          nextVersion,
+        ),
+      db
+        .prepare(
+          `UPDATE maintenance_plans SET last_executed_at = ?,
           version = version + 1, updated_at = ?
          WHERE id = ? AND organization_id = ? AND site_id = ?
            AND EXISTS (SELECT 1 FROM work_orders WHERE id = ? AND version = ?)`,
-      )
-      .bind(
-        order.actualEnd ?? now,
+        )
+        .bind(
+          order.actualEnd ?? now,
+          now,
+          order.maintenancePlanId,
+          context.session.organizationId,
+          context.session.siteId,
+          order.id,
+          nextVersion,
+        ),
+      eventStatement(db, context, {
+        orderId: order.id,
+        eventType: "WORK_ORDER_CLOSED",
+        fromStatus: "COMPLETED",
+        toStatus: "CLOSED",
+        note: "Trabajo validado, conocimiento consolidado y orden cerrada.",
+        expectedVersion: nextVersion,
         now,
-        order.maintenancePlanId,
-        context.session.organizationId,
-        context.session.siteId,
-        order.id,
-        nextVersion,
-      ),
-    eventStatement(db, context, {
-      orderId: order.id,
-      eventType: "WORK_ORDER_CLOSED",
-      fromStatus: "COMPLETED",
-      toStatus: "CLOSED",
-      note: "Trabajo validado, conocimiento consolidado y orden cerrada.",
-      expectedVersion: nextVersion,
-      now,
-    }),
-    auditStatement(db, context, {
-      action: "WORK_ORDER_CLOSED",
-      orderId: order.id,
-      previousValue: { status: "COMPLETED" },
-      newValue: { status: "CLOSED", closedAt: now },
-      expectedVersion: nextVersion,
-      now,
-    }),
-  ]);
+      }),
+      auditStatement(db, context, {
+        action: "WORK_ORDER_CLOSED",
+        orderId: order.id,
+        previousValue: { status: "COMPLETED" },
+        newValue: { status: "CLOSED", closedAt: now },
+        expectedVersion: nextVersion,
+        now,
+      }),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0]);
 }
 
@@ -915,43 +953,71 @@ export async function cancelWorkOrder(
       "Finaliza las sesiones activas antes de cancelar.",
     );
   }
+  const reservations = await getD1()
+    .prepare(
+      "SELECT COUNT(*) AS count FROM work_order_materials WHERE work_order_id = ? AND reserved_quantity > 0",
+    )
+    .bind(order.id)
+    .first<{ count: number }>();
+  if (reservations?.count)
+    throw new ApiContractError(
+      409,
+      "RESERVED_MATERIALS",
+      "Libera las reservas de material antes de cancelar la orden.",
+    );
+  const downtime = await getD1()
+    .prepare(
+      "SELECT id FROM downtime_events WHERE work_order_id = ? AND ended_at IS NULL",
+    )
+    .bind(order.id)
+    .first();
+  if (downtime)
+    throw new ApiContractError(
+      409,
+      "ACTIVE_DOWNTIME",
+      "Finaliza el downtime antes de cancelar la orden.",
+    );
   const now = operationNow(context);
   const nextVersion = order.version + 1;
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE work_orders SET status = 'CANCELLED', cancelled_at = ?,
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE work_orders SET status = 'CANCELLED', cancelled_at = ?,
           version = version + 1, updated_at = ?
          WHERE id = ? AND organization_id = ? AND site_id = ? AND status = ? AND version = ?`,
-      )
-      .bind(
+        )
+        .bind(
+          now,
+          now,
+          order.id,
+          context.session.organizationId,
+          context.session.siteId,
+          order.status,
+          order.version,
+        ),
+      eventStatement(db, context, {
+        orderId: order.id,
+        eventType: "WORK_ORDER_CANCELLED",
+        fromStatus: order.status,
+        toStatus: "CANCELLED",
+        note: reason.trim(),
+        expectedVersion: nextVersion,
         now,
+      }),
+      auditStatement(db, context, {
+        action: "WORK_ORDER_CANCELLED",
+        orderId: order.id,
+        previousValue: { status: order.status },
+        newValue: { status: "CANCELLED", reason: reason.trim() },
+        expectedVersion: nextVersion,
         now,
-        order.id,
-        context.session.organizationId,
-        context.session.siteId,
-        order.status,
-        order.version,
-      ),
-    eventStatement(db, context, {
-      orderId: order.id,
-      eventType: "WORK_ORDER_CANCELLED",
-      fromStatus: order.status,
-      toStatus: "CANCELLED",
-      note: reason.trim(),
-      expectedVersion: nextVersion,
-      now,
-    }),
-    auditStatement(db, context, {
-      action: "WORK_ORDER_CANCELLED",
-      orderId: order.id,
-      previousValue: { status: order.status },
-      newValue: { status: "CANCELLED", reason: reason.trim() },
-      expectedVersion: nextVersion,
-      now,
-    }),
-  ]);
+      }),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0]);
 }
 
@@ -972,36 +1038,40 @@ export async function changeWorkOrderPriority(
   const now = operationNow(context);
   const nextVersion = order.version + 1;
   const db = getD1();
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE work_orders SET priority = ?, version = version + 1, updated_at = ?
+  const results = await atomicBatch(
+    db,
+    [
+      db
+        .prepare(
+          `UPDATE work_orders SET priority = ?, version = version + 1, updated_at = ?
          WHERE id = ? AND organization_id = ? AND site_id = ? AND priority = ? AND version = ?`,
-      )
-      .bind(
-        priority,
+        )
+        .bind(
+          priority,
+          now,
+          order.id,
+          context.session.organizationId,
+          context.session.siteId,
+          order.priority,
+          order.version,
+        ),
+      eventStatement(db, context, {
+        orderId: order.id,
+        eventType: "PRIORITY_CHANGED",
+        note: `Prioridad actualizada a ${priority}.`,
+        expectedVersion: nextVersion,
         now,
-        order.id,
-        context.session.organizationId,
-        context.session.siteId,
-        order.priority,
-        order.version,
-      ),
-    eventStatement(db, context, {
-      orderId: order.id,
-      eventType: "PRIORITY_CHANGED",
-      note: `Prioridad actualizada a ${priority}.`,
-      expectedVersion: nextVersion,
-      now,
-    }),
-    auditStatement(db, context, {
-      action: "PRIORITY_CHANGED",
-      orderId: order.id,
-      previousValue: { priority: order.priority },
-      newValue: { priority },
-      expectedVersion: nextVersion,
-      now,
-    }),
-  ]);
+      }),
+      auditStatement(db, context, {
+        action: "PRIORITY_CHANGED",
+        orderId: order.id,
+        previousValue: { priority: order.priority },
+        newValue: { priority },
+        expectedVersion: nextVersion,
+        now,
+      }),
+    ],
+    [0],
+  );
   assertMutationApplied(results[0]);
 }

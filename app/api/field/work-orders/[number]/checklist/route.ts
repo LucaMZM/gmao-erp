@@ -2,7 +2,10 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { assertSameOrigin, requireApiSession } from "@/lib/server/auth";
 import { apiErrorResponse, readJsonBody } from "@/lib/server/http";
-import { answerChecklistTask } from "@/lib/server/operations/field";
+import {
+  answerChecklistTask,
+  authorizeFieldReplay,
+} from "@/lib/server/operations/field";
 import { runIdempotent } from "@/lib/server/operations/shared";
 
 const schema = z.object({
@@ -34,12 +37,18 @@ export async function POST(
     }
     const { number } = await params;
     const context = { session, requestId };
+    await authorizeFieldReplay(
+      context,
+      decodeURIComponent(number),
+      "FIELD_CHECKLIST",
+    );
     const { value: data, replayed } = await runIdempotent(
       context,
       request.headers.get("idempotency-key"),
       "FIELD_CHECKLIST",
       () =>
         answerChecklistTask(context, decodeURIComponent(number), parsed.data),
+      { number: decodeURIComponent(number), input: parsed.data },
     );
     return NextResponse.json({ data, replayed, requestId });
   } catch (error) {

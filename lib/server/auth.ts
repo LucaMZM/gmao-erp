@@ -286,6 +286,24 @@ export async function requireApiSession(): Promise<DemoUserSession> {
   if (!session) {
     throw new ApiContractError(401, "UNAUTHORIZED", "Sesión requerida.");
   }
+  const requestHeaders = await headers();
+  const expected = [
+    requestHeaders.get("x-mazmi-user"),
+    requestHeaders.get("x-mazmi-site"),
+    requestHeaders.get("x-mazmi-organization"),
+  ];
+  if (
+    expected.some((value) => value !== null) &&
+    (expected[0] !== session.userId ||
+      expected[1] !== session.siteId ||
+      expected[2] !== session.organizationId)
+  ) {
+    throw new ApiContractError(
+      403,
+      "OFFLINE_SCOPE_CHANGED",
+      "La operación pertenece a otra sesión o planta. Vuelve al contexto original para sincronizar.",
+    );
+  }
   await rotateSessionIfDue(session);
   return session;
 }

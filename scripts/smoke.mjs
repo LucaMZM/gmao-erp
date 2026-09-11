@@ -9,6 +9,20 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+async function assertRenderedPage(response, path) {
+  assert(response.ok, `${path} failed with ${response.status}`);
+  const body = await response.text();
+  // Streaming SSR may send HTTP 200 before a route fails. Check the completed
+  // payload, not just its shell/status (error boundaries are serialized too).
+  const decoded = body.replaceAll('\\"', '"');
+  assert(
+    !/:E\{"digest":/.test(decoded),
+    `${path} streamed an RSC error despite HTTP ${response.status}`,
+  );
+  assert(/<h1(?:\s[^>]*)?>/.test(body), `${path} did not render page content`);
+  return body;
+}
+
 async function expectApiError(response, status, code) {
   assert(
     response.status === status,
@@ -94,7 +108,7 @@ const health = await fetch(`${baseUrl}/api/health`);
 assert(health.ok, `Health check failed with ${health.status}`);
 const healthData = await health.json();
 assert(
-  healthData.schemaVersion === "0009_enterprise_audit_guardrails",
+  healthData.schemaVersion === "0010_atomic_mutation_assertions",
   `Unexpected schema version ${healthData.schemaVersion}.`,
 );
 assert(healthData.assets === 72, "Expected 72 seeded assets.");
@@ -251,8 +265,7 @@ const routes = [
 
 for (const route of routes) {
   const response = await fetch(`${baseUrl}${route}`, { headers: { cookie } });
-  assert(response.ok, `${route} failed with ${response.status}`);
-  const body = await response.text();
+  const body = await assertRenderedPage(response, route);
   assert(body.includes("Mazmi"), `${route} did not render the product shell.`);
   assert(
     !body.includes("No se han podido cargar los datos"),
@@ -1575,7 +1588,7 @@ await expectApiError(
     "/api/incidents",
     cookie,
     {
-      functionalLocationId: "loc-alz-lm-01",
+      functionalLocationId: "loc-alz-sr-04",
       title: "Ensayo de aislamiento de idempotencia",
       description:
         "La respuesta de Levante no debe cruzar al centro de Alzira.",
@@ -1738,7 +1751,7 @@ const outOfAreaEvidence = await fetch(
   { headers: { cookie: operatorCookie } },
 );
 assert(
-  outOfAreaEvidence.status === 404,
+  outOfAreaEvidence.status === 403,
   `Area-scoped user accessed evidence outside its area (${outOfAreaEvidence.status}).`,
 );
 await expectApiError(
@@ -1787,6 +1800,10 @@ assert(
   warehouseProcurement.ok,
   "Warehouse receiver could not access scoped procurement.",
 );
+await assertRenderedPage(
+  warehouseProcurement,
+  "/procurement (warehouse scoped)",
+);
 for (const outOfWarehouseRoute of [
   `/procurement/requisitions/${encodeURIComponent(lineWarehouseRequisition.number)}`,
   `/procurement/purchase-orders/${encodeURIComponent(lineWarehouseOrder.number)}`,
@@ -1796,7 +1813,10 @@ for (const outOfWarehouseRoute of [
   });
   const body = await response.text();
   assert(
-    response.status === 404 || body.includes("Fuera de contexto"),
+    response.status === 404 ||
+      /:E\{"digest":"NEXT_HTTP_ERROR_FALLBACK;404"/.test(
+        body.replaceAll('\\"', '"'),
+      ),
     `${outOfWarehouseRoute} did not render a scoped not-found response (${response.status}).`,
   );
   assert(

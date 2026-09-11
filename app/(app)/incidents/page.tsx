@@ -6,6 +6,8 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import Link from "next/link";
+import { redirect } from "next/navigation";
+import { hasPermission } from "@/lib/domain/governance";
 import { IncidentCreateDialog } from "@/components/incidents/incident-create-dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
@@ -32,6 +34,8 @@ export default async function IncidentsPage({
 }) {
   const filters = await searchParams;
   const session = await requireDemoSession();
+  if (!hasPermission(session.permissionCodes, "incident.report"))
+    redirect("/overview");
   const scope = tenantScope(session);
   const [data, options] = await Promise.all([
     listIncidents(scope, filters),
