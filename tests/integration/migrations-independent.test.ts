@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { readdirSync, readFileSync } from "node:fs";
+import { unstable_splitSqlQuery } from "wrangler";
 import { seedDemoDatabase } from "@/db/seed";
 import { seedV1BDatabase } from "@/db/seed-v1b";
 import { seedV1CDatabase } from "@/db/seed-v1c";
@@ -73,6 +74,29 @@ afterAll(async () => {
   for (const runtime of runtimes) await runtime.dispose();
 });
 describe("independent migration torture — actual bootstrap and D1", () => {
+  it("0010 keeps complete triggers through deployment SQL splitting", async () => {
+    const db = await database();
+    await historicalSchema(db, 9);
+    const sql = readFileSync(
+      "drizzle/0010_atomic_mutation_assertions.sql",
+      "utf8",
+    );
+    const statements = unstable_splitSqlQuery(sql);
+    expect(statements).toHaveLength(6);
+    expect(
+      statements.filter((statement) => statement.startsWith("CREATE TRIGGER")),
+    ).toHaveLength(3);
+    await db.batch(statements.map((statement) => db.prepare(statement)));
+    const guards = await db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE name IN ('_mutation_assertions','uq_labor_one_active_user','uq_downtime_one_active_order','trg_work_order_finalization_guard','trg_material_final_order_guard','trg_downtime_final_order_guard')",
+      )
+      .all();
+    expect(guards.results).toHaveLength(6);
+    expect(
+      (await db.prepare("PRAGMA foreign_key_check").all()).results,
+    ).toEqual([]);
+  });
   it("rejects a hosted guard with the right name but a weaker definition", async () => {
     const db = await database();
     await historicalSchema(db, 10);

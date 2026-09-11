@@ -31,6 +31,8 @@ Las pruebas nuevas no sustituyen SQL por mocks: `tests/integration/independent-a
 
 ## Migración 0010
 
+**Incidencia de publicación — BLOCKER hasta validación remota:** Sites rechazó la primera revisión de auditoría (v5, `eb1184b`) con `incomplete input: SQLITE_ERROR` antes de publicar el Worker. La inspección remota posterior no encontró `_mutation_assertions` y el ledger Mazmi continuó en 0009; no se aplicó 0010. Se corrigió exclusivamente ese delta no aplicado: cuerpo de trigger compacto, `SELECT RAISE(...) WHERE ...` equivalente, sin CASE anidados ni comentarios auxiliares, conservando los seis objetos y los mismos errores/invariantes. No se modificó 0000–0009 ni se añadió una migración que pretendiera saltar el fallo. El parser nativo Wrangler y D1 verifican seis sentencias completas; esa prueba complementa, pero no sustituye, la confirmación de Sites. El origen interno exacto del error de parsing de Sites no está expuesto por la plataforma; no se atribuye falsamente al parser Wrangler, que acepta ambas formas.
+
 `0010_atomic_mutation_assertions.sql` es **aditiva**. No reescribe 0000–0009 ni corrige/borra historial:
 
 - `_mutation_assertions`: CHECK transaccional para abortar compare-and-swap fallidos; no almacena filas en operaciones correctas.
@@ -52,13 +54,13 @@ Los tiempos son mediciones locales, no SLA ni percentiles de producción. Últim
 
 | Consulta    | Milisegundos | Bytes JSON    |
 | ----------- | ------------ | ------------- |
-| Overview    | 110 → 126    | 5288 → 5304   |
-| Planner     | 62 → 56      | 29317 → 29317 |
-| Reliability | 113 → 135    | 49993 → 95789 |
-| Procurement | 82 → 78      | 61201 → 61201 |
-| Reporting   | 65 → 75      | 3272 → 3289   |
-| Inventario  | 36 → 35      | 10947 → 10947 |
-| My Work     | 89 → 67      | 480 → 480     |
+| Overview    | 86 → 108     | 5293 → 5307   |
+| Planner     | 54 → 51      | 56549 → 56549 |
+| Reliability | 101 → 123    | 51724 → 97059 |
+| Procurement | 81 → 75      | 61225 → 61225 |
+| Reporting   | 68 → 68      | 3285 → 3302   |
+| Inventario  | 36 → 33      | 10931 → 10931 |
+| My Work     | 79 → 63      | 480 → 480     |
 
 No se observa crecimiento cuadrático en esta muestra. My Work corresponde al responsable sin agenda propia; no se extrapola a una agenda de técnico masiva. La prueba compara recurrencia, MTBF, MTTR, disponibilidad, costes, Pareto, tendencias y health de cada bad actor contra SQL independiente/expediente.
 
@@ -87,14 +89,14 @@ La regresión `interrupted idempotency checkpoint...` materializa en D1 exactame
 - **Recuperación:** no hay autoservicio ni vencimiento de la reserva. Un administrador debe confirmar que la petición original ha terminado, identificar por ID/actor/organización/planta/key el registro sin `response_json`, comprobar ausencia de efecto de negocio y conservar evidencia del diagnóstico. Con acceso D1 autorizado elimina **solo ese registro pendiente**, condicionado a `response_json IS NULL`, registra la intervención y permite reintentar con la key y payload originales. Nunca eliminar una respuesta confirmada ni hacer borrado masivo por antigüedad.
 - **Decisión:** MEDIUM porque bloquea una operación individual recuperable, sin exposición entre usuarios/plantas ni corrupción de datos confirmados. No impide razonablemente la RC privada auditada; no equivale a garantizar operación desatendida de alta disponibilidad.
 
-Recuento de hallazgos de producto de Astra: **17** (8 HIGH, 8 MEDIUM, 1 LOW). Los 16 de la tabla fueron corregidos; este límite MEDIUM permanece documentado. Los advisories del toolchain se contabilizan aparte.
+Recuento de hallazgos de producto/publicación de Astra: **18** (1 BLOCKER de publicación, 8 HIGH, 8 MEDIUM, 1 LOW). Los 16 de la tabla fueron corregidos; el límite idempotente MEDIUM permanece documentado. El BLOCKER de 0010 solo se cierra al confirmar su publicación efectiva. Los advisories del toolchain se contabilizan aparte.
 
 ## Gate definitivo local (2026-09-11)
 
 | Gate                                                                     | Resultado                                                                                                                  |
 | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
 | Format / format:check / lint / TypeScript                                | PASS                                                                                                                       |
-| Unit/integration completos                                               | **152/152 PASS**, 11 archivos: 85 unitarios, 49 D1 adversariales, 9 migración, 9 IndexedDB/Chromium                        |
+| Unit/integration completos                                               | **153/153 PASS**, 11 archivos: 85 unitarios, 49 D1 adversariales, 10 migración, 9 IndexedDB/Chromium                       |
 | HTTP adversarial sobre Worker compilado                                  | **34/34 PASS**; sesión viva, rotación simultánea, expiración, revocación, ownership, scope, concurrencia/fault injection   |
 | E2E/smoke acumulado V1A–V2B                                              | PASS; flujos persistidos, rutas, negativos de auth/API, Levante/Alzira                                                     |
 | Regresión visual sin update, Worker compilado                            | **10/10 PASS**; desktop 1440×1000 y móvil 390×844, dark/light, foco/landmarks/labels, consola y page errors vacíos         |
@@ -108,4 +110,4 @@ Recuento de hallazgos de producto de Astra: **17** (8 HIGH, 8 MEDIUM, 1 LOW). Lo
 
 Automatización versionada: `npm test`, `npm run test:audit:http`, `npm run test:smoke:compiled`, `npm run test:visual:compiled`, `npm run format:check`, `npm run lint`, `npm run typecheck`, build y audit. El smoke compilado crea D1/R2 aislados y no toca el deployment; el smoke publicado es un recorrido acotado autenticado, no la suite mutativa entera sobre producción.
 
-No hay BLOCKER/HIGH de producto abierto en el alcance auditado. El límite idempotente MEDIUM permanece explícito. La confirmación RC requiere además publicación **owner-private** de esta misma fuente/artefacto, 0010 activa, contenido real en health/login/Overview/My Work/Reliability/Procurement/Reporting, logout con acceso posterior denegado y logs reales sin errores nuevos. Los identificadores finales y el resultado de esa publicación se adjuntan en la entrega, no se presuponen aquí.
+No hay HIGH de producto abierto en el alcance auditado. El límite idempotente MEDIUM permanece explícito. El BLOCKER de publicación exige confirmar 0010 remotamente. La confirmación RC requiere además publicación **owner-private** de esta misma fuente/artefacto, 0010 activa, contenido real en health/login/Overview/My Work/Reliability/Procurement/Reporting, logout con acceso posterior denegado y logs reales sin errores nuevos. Los identificadores finales y el resultado de esa publicación se adjuntan en la entrega, no se presuponen aquí.
