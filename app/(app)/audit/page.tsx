@@ -1,10 +1,14 @@
-import { Filter, ShieldCheck } from "lucide-react";
+import { Search, ShieldCheck } from "lucide-react";
 import { redirect } from "next/navigation";
+import { FacetedFilterForm } from "@/components/ui/faceted-filter-form";
 import { PageHeader } from "@/components/ui/page-header";
 import { hasPermission } from "@/lib/domain/governance";
 import { formatDateTime } from "@/lib/presentation";
 import { requireDemoSession } from "@/lib/server/auth";
-import { getAuditEntries } from "@/lib/server/repositories/governance";
+import {
+  getAuditEntries,
+  getAuditFacets,
+} from "@/lib/server/repositories/governance";
 
 function valuePreview(value: string | null) {
   if (!value) return "—";
@@ -36,7 +40,43 @@ export default async function AuditPage({
     from: one("from"),
     to: one("to"),
   };
-  const entries = await getAuditEntries(session, filters);
+  const [entries, facets] = await Promise.all([
+    getAuditEntries(session, filters),
+    getAuditFacets(session, filters),
+  ]);
+  const entityLabels: Record<string, string> = {
+    SESSION: "Sesión",
+    WORK_ORDER: "Orden de trabajo",
+    PURCHASE_ORDER: "Pedido",
+    ROOT_CAUSE_ANALYSIS: "RCA",
+    MEMBERSHIP: "Acceso",
+  };
+  const outcomeLabels: Record<string, string> = {
+    SUCCESS: "Correcto",
+    DENIED: "Denegado",
+    FAILURE: "Fallido",
+  };
+  const availableEntities = new Set(facets.entities.map((item) => item.value));
+  const availableOutcomes = new Set(facets.outcomes.map((item) => item.value));
+  const activeFilters = [
+    filters.action
+      ? { key: "action", label: `Acción: ${filters.action}` }
+      : null,
+    filters.entity
+      ? {
+          key: "entity",
+          label: `Entidad: ${entityLabels[filters.entity] ?? filters.entity}`,
+        }
+      : null,
+    filters.outcome
+      ? {
+          key: "outcome",
+          label: `Resultado: ${outcomeLabels[filters.outcome] ?? filters.outcome}`,
+        }
+      : null,
+    filters.from ? { key: "from", label: `Desde: ${filters.from}` } : null,
+    filters.to ? { key: "to", label: `Hasta: ${filters.to}` } : null,
+  ].filter((item): item is { key: string; label: string } => item !== null);
   return (
     <div className="page-stack governance-page">
       <PageHeader
@@ -44,8 +84,11 @@ export default async function AuditPage({
         eyebrow={`${session.siteCode} · Gobierno`}
         title="Auditoría"
       />
-      <form className="filter-bar audit-filter-bar">
-        <Filter size={15} />
+      <FacetedFilterForm
+        activeFilters={activeFilters}
+        className="filter-bar audit-filter-bar"
+      >
+        <Search size={15} />
         <input
           aria-label="Acción contiene"
           defaultValue={filters.action}
@@ -58,11 +101,19 @@ export default async function AuditPage({
           name="entity"
         >
           <option value="">Todas las entidades</option>
-          <option value="SESSION">Sesión</option>
-          <option value="WORK_ORDER">Orden de trabajo</option>
-          <option value="PURCHASE_ORDER">Pedido</option>
-          <option value="ROOT_CAUSE_ANALYSIS">RCA</option>
-          <option value="MEMBERSHIP">Acceso</option>
+          {filters.entity && !availableEntities.has(filters.entity) ? (
+            <option disabled value={filters.entity}>
+              {entityLabels[filters.entity] ?? filters.entity} · sin
+              coincidencias
+            </option>
+          ) : null}
+          {Object.entries(entityLabels)
+            .filter(([value]) => availableEntities.has(value))
+            .map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
         </select>
         <select
           aria-label="Resultado"
@@ -70,9 +121,19 @@ export default async function AuditPage({
           name="outcome"
         >
           <option value="">Todos los resultados</option>
-          <option value="SUCCESS">Correcto</option>
-          <option value="DENIED">Denegado</option>
-          <option value="FAILURE">Fallido</option>
+          {filters.outcome && !availableOutcomes.has(filters.outcome) ? (
+            <option disabled value={filters.outcome}>
+              {outcomeLabels[filters.outcome] ?? filters.outcome} · sin
+              coincidencias
+            </option>
+          ) : null}
+          {Object.entries(outcomeLabels)
+            .filter(([value]) => availableOutcomes.has(value))
+            .map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
         </select>
         <input
           aria-label="Desde"
@@ -89,7 +150,7 @@ export default async function AuditPage({
         <button className="secondary-button" type="submit">
           Aplicar
         </button>
-      </form>
+      </FacetedFilterForm>
       <section
         className="data-panel audit-stream"
         aria-label="Registro de auditoría"

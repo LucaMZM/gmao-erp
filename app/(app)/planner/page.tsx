@@ -1,4 +1,5 @@
 import { tenantScope } from "@/lib/server/repositories/shared";
+import { env } from "cloudflare:workers";
 import {
   ArrowLeft,
   ArrowRight,
@@ -36,7 +37,7 @@ export default async function PlannerPage({
     redirect("/overview");
   const scope = tenantScope(session);
   const [data, activeField] = await Promise.all([
-    getPlannerData(scope, session.userId, requestedWeek),
+    getPlannerData(scope, session.userId, requestedWeek, env.MAZMI_TEST_NOW),
     getActiveFieldTechnicians(scope),
   ]);
   const plannedMinutes = data.capacity.reduce(

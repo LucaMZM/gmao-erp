@@ -8,7 +8,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ClipboardList,
-  Command,
   Gauge,
   HardHat,
   LogOut,
@@ -35,6 +34,7 @@ import {
   hasPermission,
   type EnterprisePermission,
 } from "@/lib/domain/governance";
+import { useHydrated } from "@/lib/client/use-hydrated";
 
 const navigation: Array<{
   href: string;
@@ -155,6 +155,7 @@ export function AppShell({
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [userOpen, setUserOpen] = useState(false);
   const [switchingSite, setSwitchingSite] = useState<string | null>(null);
+  const hydrated = useHydrated();
   const visibleNavigation = navigation.filter(
     (item) =>
       !item.permission ||
@@ -243,6 +244,7 @@ export function AppShell({
   return (
     <div
       className="app-frame"
+      data-hydrated={hydrated || undefined}
       data-offline-user={session.userId}
       data-offline-site={session.siteId}
       data-offline-org={session.organizationId}
@@ -354,9 +356,6 @@ export function AppShell({
             >
               <Search size={15} />
               <span>Buscar activo, OT o recambio</span>
-              <kbd>
-                <Command size={10} />K
-              </kbd>
             </button>
             <button
               className="round-tool theme-toggle"
@@ -559,7 +558,7 @@ function CommandPalette({
           {!query ? (
             <div className="command-hint">
               <span>
-                <Command size={14} /> Navegación rápida
+                <Search size={14} /> Búsqueda rápida
               </span>
               <p>
                 Busca por código industrial, descripción o referencia de

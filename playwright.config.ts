@@ -28,8 +28,11 @@ export default defineConfig({
   webServer: process.env.MAZMI_VISUAL_BASE_URL
     ? undefined
     : {
-        command:
-          "MAZMI_EPHEMERAL_STATE=1 npm run dev -- --hostname 127.0.0.1 --port 3020",
+        command: "npm run dev -- --hostname 127.0.0.1 --port 3020",
+        env: {
+          MAZMI_EPHEMERAL_STATE: "1",
+          MAZMI_TEST_NOW: "2026-09-08T12:00:00.000Z",
+        },
         url: baseURL,
         reuseExistingServer: true,
         timeout: 120_000,

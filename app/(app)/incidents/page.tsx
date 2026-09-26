@@ -10,6 +10,7 @@ import { redirect } from "next/navigation";
 import { hasPermission } from "@/lib/domain/governance";
 import { IncidentCreateDialog } from "@/components/incidents/incident-create-dialog";
 import { EmptyState } from "@/components/ui/empty-state";
+import { FacetedFilterForm } from "@/components/ui/faceted-filter-form";
 import { PageHeader } from "@/components/ui/page-header";
 import { Pagination } from "@/components/ui/pagination";
 import { StatusBadge } from "@/components/ui/status-badge";
@@ -42,6 +43,37 @@ export default async function IncidentsPage({
     getIncidentOptions(scope),
   ]);
   const view = typeof filters.view === "string" ? filters.view : "triage";
+  const selectedStatus =
+    typeof filters.status === "string" ? filters.status : "";
+  const selectedSeverity =
+    typeof filters.severity === "string" ? filters.severity : "";
+  const severityLabels: Record<string, string> = {
+    CRITICAL: "Crítica",
+    HIGH: "Alta",
+    MEDIUM: "Media",
+    LOW: "Baja",
+  };
+  const availableStatuses = new Set(
+    data.facets.statuses.map((item) => item.value),
+  );
+  const availableSeverities = new Set(
+    data.facets.severities.map((item) => item.value),
+  );
+  const activeFilters = [
+    data.query ? { key: "q", label: `Búsqueda: ${data.query}` } : null,
+    selectedStatus
+      ? {
+          key: "status",
+          label: `Estado: ${statusLabels[selectedStatus] ?? selectedStatus}`,
+        }
+      : null,
+    selectedSeverity
+      ? {
+          key: "severity",
+          label: `Severidad: ${severityLabels[selectedSeverity] ?? selectedSeverity}`,
+        }
+      : null,
+  ].filter((item): item is { key: string; label: string } => item !== null);
   const views = [
     {
       key: "triage",
@@ -95,7 +127,10 @@ export default async function IncidentsPage({
       </nav>
 
       <section className="toolbar-panel">
-        <form className="filter-form" method="get">
+        <FacetedFilterForm
+          activeFilters={activeFilters}
+          preserveOnClear={["view"]}
+        >
           <label className="search-field">
             <Search size={16} />
             <input
@@ -106,43 +141,49 @@ export default async function IncidentsPage({
           </label>
           <select
             aria-label="Filtrar por estado"
-            defaultValue={
-              typeof filters.status === "string" ? filters.status : ""
-            }
+            defaultValue={selectedStatus}
             name="status"
           >
             <option value="">Todos los estados</option>
-            {[
-              "NEW",
-              "IN_TRIAGE",
-              "ACCEPTED",
-              "REJECTED",
-              "CONVERTED",
-              "CLOSED",
-            ].map((status) => (
-              <option key={status} value={status}>
-                {statusLabels[status]}
+            {selectedStatus && !availableStatuses.has(selectedStatus) ? (
+              <option disabled value={selectedStatus}>
+                {statusLabels[selectedStatus] ?? selectedStatus} · sin
+                coincidencias
               </option>
-            ))}
+            ) : null}
+            {["NEW", "IN_TRIAGE", "ACCEPTED", "REJECTED", "CONVERTED", "CLOSED"]
+              .filter((status) => availableStatuses.has(status))
+              .map((status) => (
+                <option key={status} value={status}>
+                  {statusLabels[status]}
+                </option>
+              ))}
           </select>
           <select
             aria-label="Filtrar por severidad"
-            defaultValue={
-              typeof filters.severity === "string" ? filters.severity : ""
-            }
+            defaultValue={selectedSeverity}
             name="severity"
           >
             <option value="">Toda severidad</option>
-            <option value="CRITICAL">Crítica</option>
-            <option value="HIGH">Alta</option>
-            <option value="MEDIUM">Media</option>
-            <option value="LOW">Baja</option>
+            {selectedSeverity && !availableSeverities.has(selectedSeverity) ? (
+              <option disabled value={selectedSeverity}>
+                {severityLabels[selectedSeverity] ?? selectedSeverity} · sin
+                coincidencias
+              </option>
+            ) : null}
+            {Object.entries(severityLabels)
+              .filter(([value]) => availableSeverities.has(value))
+              .map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
           </select>
           <input name="view" type="hidden" value={view} />
           <button className="filter-submit" type="submit">
             <SlidersHorizontal size={15} /> Aplicar
           </button>
-        </form>
+        </FacetedFilterForm>
       </section>
 
       <section className="data-panel table-panel">

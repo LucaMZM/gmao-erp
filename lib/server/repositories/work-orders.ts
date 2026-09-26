@@ -1,5 +1,5 @@
 import { dateKeyInTimeZone } from "@/lib/presentation";
-import type { SqlValue, TenantScope } from "./shared";
+import type { FacetOption, SqlValue, TenantScope } from "./shared";
 import {
   locationScopePredicate,
   normalizePage,
@@ -53,20 +53,30 @@ export type WorkOrderListData = {
     totalOpen: number;
   };
   query: string;
+  facets: {
+    statuses: FacetOption[];
+    priorities: FacetOption[];
+    types: FacetOption[];
+  };
 };
 
-export async function listWorkOrders(
+type NormalizedWorkOrderFilters = {
+  query: string;
+  status: string;
+  priority: string;
+  type: string;
+  view: string;
+  now: string;
+  today: string;
+};
+
+type WorkOrderFacet = "status" | "priority" | "type";
+
+function workOrderConditions(
   scope: TenantScope,
-  filters: WorkOrderFilters,
-): Promise<WorkOrderListData> {
-  const page = normalizePage(filters.page);
-  const query = normalizeQuery(filters.q);
-  const status = normalizeQuery(filters.status, 30);
-  const priority = normalizeQuery(filters.priority, 30);
-  const type = normalizeQuery(filters.type, 30);
-  const view = normalizeQuery(filters.view, 30) || "attention";
-  const now = new Date().toISOString();
-  const today = dateKeyInTimeZone(now);
+  filters: NormalizedWorkOrderFilters,
+  exclude?: WorkOrderFacet,
+): { conditions: string[]; params: SqlValue[] } {
   const conditions = ["wo.site_id = ?"];
   const params: SqlValue[] = [scope.siteId];
   const locationScope = locationScopePredicate(
@@ -75,40 +85,85 @@ export async function listWorkOrders(
   );
   conditions.push(locationScope.sql);
   params.push(...locationScope.params);
-
-  if (view === "attention") {
+  if (filters.view === "attention") {
     conditions.push(
       `wo.status IN ${OPEN_STATES} AND (wo.priority IN ('P1_EMERGENCY','P2_URGENT') OR wo.due_at < ? OR wo.status IN ('WAITING_PART','WAITING_VENDOR'))`,
     );
-    params.push(now);
-  } else if (view === "today") {
+    params.push(filters.now);
+  } else if (filters.view === "today") {
     conditions.push("substr(wo.planned_start, 1, 10) = ?");
-    params.push(today);
-  } else if (view === "backlog") {
+    params.push(filters.today);
+  } else if (filters.view === "backlog") {
     conditions.push(`wo.status IN ${OPEN_STATES}`);
   }
-  if (query) {
-    const like = `%${query}%`;
+  if (filters.query) {
+    const like = `%${filters.query}%`;
     conditions.push(
       "(wo.number LIKE ? OR wo.title LIKE ? OR asset.code LIKE ? OR asset.name LIKE ?)",
     );
     params.push(like, like, like, like);
   }
-  if (status) {
+  if (exclude !== "status" && filters.status) {
     conditions.push("wo.status = ?");
-    params.push(status);
+    params.push(filters.status);
   }
-  if (priority) {
+  if (exclude !== "priority" && filters.priority) {
     conditions.push("wo.priority = ?");
-    params.push(priority);
+    params.push(filters.priority);
   }
-  if (type) {
+  if (exclude !== "type" && filters.type) {
     conditions.push("wo.type = ?");
-    params.push(type);
+    params.push(filters.type);
   }
-  const where = conditions.join(" AND ");
+  return { conditions, params };
+}
 
-  const [countRow, items, counts] = await Promise.all([
+async function getWorkOrderFacets(
+  scope: TenantScope,
+  filters: NormalizedWorkOrderFilters,
+): Promise<WorkOrderListData["facets"]> {
+  const queryFacet = (column: WorkOrderFacet) => {
+    const scoped = workOrderConditions(scope, filters, column);
+    return queryAll<FacetOption>(
+      `SELECT wo.${column} AS value, COUNT(*) AS count
+       FROM work_orders wo INNER JOIN assets asset ON asset.id = wo.asset_id
+       WHERE ${scoped.conditions.join(" AND ")}
+       GROUP BY wo.${column}`,
+      scoped.params,
+    );
+  };
+  const [statuses, priorities, types] = await Promise.all([
+    queryFacet("status"),
+    queryFacet("priority"),
+    queryFacet("type"),
+  ]);
+  return { statuses, priorities, types };
+}
+
+export async function listWorkOrders(
+  scope: TenantScope,
+  filters: WorkOrderFilters,
+): Promise<WorkOrderListData> {
+  const page = normalizePage(filters.page);
+  const now = new Date().toISOString();
+  const today = dateKeyInTimeZone(now);
+  const normalized: NormalizedWorkOrderFilters = {
+    query: normalizeQuery(filters.q),
+    status: normalizeQuery(filters.status, 30),
+    priority: normalizeQuery(filters.priority, 30),
+    type: normalizeQuery(filters.type, 30),
+    view: normalizeQuery(filters.view, 30) || "attention",
+    now,
+    today,
+  };
+  const filtered = workOrderConditions(scope, normalized);
+  const where = filtered.conditions.join(" AND ");
+  const locationScope = locationScopePredicate(
+    scope,
+    "wo.functional_location_id",
+  );
+
+  const [countRow, items, counts, facets] = await Promise.all([
     queryFirst<{ count: number }>(
       `
       SELECT COUNT(*) AS count
@@ -116,7 +171,7 @@ export async function listWorkOrders(
       INNER JOIN assets asset ON asset.id = wo.asset_id
       WHERE ${where}
     `,
-      params,
+      filtered.params,
     ),
     queryAll<WorkOrderListItem>(
       `
@@ -153,7 +208,7 @@ export async function listWorkOrders(
         wo.number DESC
       LIMIT ? OFFSET ?
     `,
-      [...params, now, PAGE_SIZE, (page - 1) * PAGE_SIZE],
+      [...filtered.params, now, PAGE_SIZE, (page - 1) * PAGE_SIZE],
     ),
     queryFirst<{
       allCount: number;
@@ -174,6 +229,7 @@ export async function listWorkOrders(
     `,
       [now, today, scope.siteId, ...locationScope.params],
     ),
+    getWorkOrderFacets(scope, normalized),
   ]);
   const total = Number(countRow?.count ?? 0);
 
@@ -190,7 +246,8 @@ export async function listWorkOrders(
       backlog: Number(counts?.backlog ?? 0),
       totalOpen: Number(counts?.totalOpen ?? 0),
     },
-    query,
+    query: normalized.query,
+    facets,
   };
 }
 

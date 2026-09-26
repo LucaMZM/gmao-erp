@@ -1,4 +1,5 @@
 import { BarChart3, Download } from "lucide-react";
+import { env } from "cloudflare:workers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/ui/page-header";
@@ -27,7 +28,7 @@ export default async function ReportsPage({
     const raw = query[key];
     return (Array.isArray(raw) ? raw[0] : raw)?.slice(0, 10) || fallback;
   };
-  const currentDate = new Date();
+  const currentDate = new Date(env.MAZMI_TEST_NOW ?? new Date().toISOString());
   const today = currentDate.toISOString().slice(0, 10);
   const startDate = new Date(currentDate);
   startDate.setUTCDate(startDate.getUTCDate() - 90);

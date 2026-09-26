@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import {
   Activity,
   ArrowLeft,
-  Box,
   CalendarClock,
   Camera,
   CircleDollarSign,
@@ -20,6 +19,7 @@ import {
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { EmptyState } from "@/components/ui/empty-state";
+import { AssetComponentTree } from "@/components/assets/asset-component-tree";
 import { HealthIndicator } from "@/components/ui/health-indicator";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { can } from "@/lib/domain/permissions";
@@ -387,25 +387,7 @@ export default async function AssetDetailPage({ params }: { params: Params }) {
               <Network size={17} />
             </div>
             {data.children.length ? (
-              <div className="component-grid">
-                {data.children.map((child) => (
-                  <Link
-                    href={`/assets/${encodeURIComponent(child.code)}`}
-                    key={child.id}
-                  >
-                    <span className="component-icon">
-                      <Box size={17} />
-                    </span>
-                    <span>
-                      <small>
-                        {child.code} · {child.className}
-                      </small>
-                      <strong>{child.name}</strong>
-                    </span>
-                    <HealthIndicator compact score={child.healthScore} />
-                  </Link>
-                ))}
-              </div>
+              <AssetComponentTree items={data.children} parentId={asset.id} />
             ) : (
               <EmptyState
                 description="Este elemento está modelado como componente final de la jerarquía."

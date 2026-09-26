@@ -12,6 +12,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { MaintenancePlanCreateDialog } from "@/components/preventive/maintenance-plan-create-dialog";
 import { EmptyState } from "@/components/ui/empty-state";
+import { FacetedFilterForm } from "@/components/ui/faceted-filter-form";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { can } from "@/lib/domain/permissions";
@@ -56,6 +57,25 @@ export default async function MaintenancePlansPage({
   const data = await listMaintenancePlans(tenantScope(session), filters);
   const canCreate = can(session, "MAINTENANCE_PLAN_CREATE");
   const now = new Date().toISOString();
+  const statusLabels: Record<string, string> = {
+    all: "Todos los planes",
+    due: "Requieren atención",
+    upcoming: "Próximos 7 días",
+    active: "Activos",
+    inactive: "Inactivos",
+  };
+  const availableStatuses = new Set(
+    data.statusFacets.map((item) => item.value),
+  );
+  const activeFilters = [
+    data.query ? { key: "q", label: `Búsqueda: ${data.query}` } : null,
+    data.status !== "all"
+      ? {
+          key: "status",
+          label: `Estado: ${statusLabels[data.status] ?? data.status}`,
+        }
+      : null,
+  ].filter((item): item is { key: string; label: string } => item !== null);
 
   return (
     <div className="page-stack preventive-page">
@@ -108,7 +128,7 @@ export default async function MaintenancePlansPage({
       </section>
 
       <section className="toolbar-panel preventive-toolbar">
-        <form className="filter-form" method="get">
+        <FacetedFilterForm activeFilters={activeFilters}>
           <label className="search-field">
             <Search size={16} />
             <input
@@ -122,16 +142,23 @@ export default async function MaintenancePlansPage({
             defaultValue={data.status}
             name="status"
           >
-            <option value="all">Todos los planes</option>
-            <option value="due">Requieren atención</option>
-            <option value="upcoming">Próximos 7 días</option>
-            <option value="active">Activos</option>
-            <option value="inactive">Inactivos</option>
+            {!availableStatuses.has(data.status) ? (
+              <option disabled value={data.status}>
+                {statusLabels[data.status] ?? data.status} · sin coincidencias
+              </option>
+            ) : null}
+            {Object.entries(statusLabels)
+              .filter(([value]) => availableStatuses.has(value))
+              .map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
           </select>
           <button className="filter-submit" type="submit">
             Aplicar
           </button>
-        </form>
+        </FacetedFilterForm>
         <Link className="secondary-button" href="/planner">
           <CalendarClock size={15} /> Abrir Planner
         </Link>

@@ -3530,19 +3530,6 @@ button:disabled {
 .command-trigger > span {
   text-align: left;
 }
-.command-trigger kbd {
-  height: 23px;
-  margin-left: auto;
-  padding: 0 7px;
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  color: var(--subtle);
-  background: var(--surface-subtle);
-  font-size: 9px;
-}
 .round-tool,
 .user-trigger {
   position: relative;
@@ -4673,6 +4660,47 @@ button:disabled {
   align-items: center;
   gap: 7px;
 }
+.faceted-filter-shell {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 7px;
+}
+.faceted-filter-shell[data-pending="true"] .filter-form {
+  opacity: 0.82;
+}
+.active-facet-list {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.active-facet-list button {
+  min-height: 26px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface-subtle);
+  font-size: 8px;
+  font-weight: 700;
+}
+.active-facet-list button:hover,
+.active-facet-list button:focus-visible {
+  border-color: var(--line-strong);
+  color: var(--ink);
+  background: var(--surface-raised);
+}
+.active-facet-list .clear-facets {
+  border-color: transparent;
+  background: transparent;
+}
+.facet-spinner {
+  margin-left: 8px;
+}
 .filter-form select,
 .filter-form .search-field {
   height: 39px;
@@ -4811,27 +4839,45 @@ button:disabled {
 .data-table tbody tr:hover {
   background: color-mix(in srgb, var(--surface-subtle) 88%, transparent);
 }
-.data-table .child-row td:first-child {
-  padding-left: 30px;
-}
 .asset-table tr.health-critical td:first-child {
   box-shadow: inset 3px 0 0 var(--critical);
 }
 .asset-table tr.health-warning td:first-child {
   box-shadow: inset 2px 0 0 color-mix(in srgb, var(--warning) 78%, transparent);
 }
-.asset-table tr.child-row .entity-cell {
-  position: relative;
+.asset-hierarchy-cell {
+  min-width: 0;
+  padding-left: calc(var(--asset-depth, 0) * 22px);
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
-.asset-table tr.child-row .entity-cell::before {
-  content: "";
-  width: 11px;
-  height: 11px;
-  margin-left: -17px;
-  flex: 0 0 auto;
-  border-bottom: 1px solid var(--line-strong);
-  border-left: 1px solid var(--line-strong);
-  border-radius: 0 0 0 4px;
+.asset-hierarchy-cell .entity-cell {
+  min-width: 0;
+  flex: 1;
+}
+.asset-expand-button,
+.asset-expand-spacer {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+}
+.asset-expand-button {
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--muted);
+  background: transparent;
+}
+.asset-expand-button:hover,
+.asset-expand-button:focus-visible {
+  border-color: var(--line);
+  color: var(--ink);
+  background: var(--surface-raised);
+}
+.asset-table tr.hierarchy-context-row {
+  background: color-mix(in srgb, var(--surface-subtle) 65%, transparent);
 }
 .asset-table .health-indicator.compact {
   min-width: 94px;
@@ -5346,13 +5392,21 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.component-grid {
+.component-tree {
   padding: 0 14px 14px;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: 6px;
 }
-.component-grid > a {
+.component-tree-row {
+  min-width: 0;
+  margin-left: calc(var(--asset-depth, 0) * 22px);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.component-tree-row > a {
+  min-width: 0;
+  flex: 1;
   min-height: 63px;
   padding: 10px;
   display: grid;
@@ -5365,7 +5419,7 @@ button:disabled {
   background: var(--surface-subtle);
   text-decoration: none;
 }
-.component-grid > a:hover {
+.component-tree-row > a:hover {
   border-color: var(--line-strong);
   background: var(--surface-raised);
 }
@@ -5378,19 +5432,19 @@ button:disabled {
   color: var(--steel);
   background: var(--steel-soft);
 }
-.component-grid small,
-.component-grid strong {
+.component-tree small,
+.component-tree strong {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.component-grid small {
+.component-tree small {
   margin-bottom: 4px;
   color: var(--subtle);
   font-size: 7px;
 }
-.component-grid strong {
+.component-tree strong {
   font-size: 9px;
 }
 .asset-timeline {
@@ -6946,6 +7000,9 @@ button:disabled {
   .toolbar-panel {
     align-items: flex-start;
   }
+  .faceted-filter-shell {
+    width: 100%;
+  }
 }
 
 @media (max-width: 900px) {
@@ -6955,8 +7012,7 @@ button:disabled {
     padding: 0;
     justify-content: center;
   }
-  .command-trigger > span,
-  .command-trigger kbd {
+  .command-trigger > span {
     display: none;
   }
   .detail-layout {
@@ -7214,8 +7270,8 @@ button:disabled {
     padding-bottom: 7px;
     border-bottom: 1px solid var(--line);
   }
-  .data-table .child-row td:first-child {
-    padding-left: 15px;
+  .asset-hierarchy-cell {
+    padding-left: calc(var(--asset-depth, 0) * 14px);
   }
   .entity-cell,
   .part-identity,
@@ -7259,9 +7315,6 @@ button:disabled {
   }
   .health-driver-grid,
   .knowledge-grid {
-    grid-template-columns: 1fr;
-  }
-  .component-grid {
     grid-template-columns: 1fr;
   }
   .entity-row-list > a {
@@ -7431,9 +7484,6 @@ button:disabled {
   }
   .search-field {
     grid-column: auto;
-  }
-  .work-filter-form select:nth-of-type(n + 2) {
-    display: none;
   }
   .work-detail-header .detail-status-cluster .primary-button {
     width: 100%;

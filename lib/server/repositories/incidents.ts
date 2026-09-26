@@ -1,4 +1,4 @@
-import type { SqlValue, TenantScope } from "./shared";
+import type { FacetOption, SqlValue, TenantScope } from "./shared";
 import {
   locationScopePredicate,
   normalizePage,
@@ -42,17 +42,21 @@ export type IncidentListData = {
   totalPages: number;
   query: string;
   counts: { new: number; triage: number; accepted: number; all: number };
+  facets: { statuses: FacetOption[]; severities: FacetOption[] };
 };
 
-export async function listIncidents(
+type NormalizedIncidentFilters = {
+  query: string;
+  status: string;
+  severity: string;
+  view: string;
+};
+
+function incidentConditions(
   scope: TenantScope,
-  filters: IncidentFilters,
-): Promise<IncidentListData> {
-  const page = normalizePage(filters.page);
-  const query = normalizeQuery(filters.q);
-  const status = normalizeQuery(filters.status, 30);
-  const severity = normalizeQuery(filters.severity, 20);
-  const view = normalizeQuery(filters.view, 20) || "triage";
+  filters: NormalizedIncidentFilters,
+  exclude?: "status" | "severity",
+): { conditions: string[]; params: SqlValue[] } {
   const conditions = ["incident.organization_id = ?", "incident.site_id = ?"];
   const params: SqlValue[] = [scope.organizationId, scope.siteId];
   const locationScope = locationScopePredicate(
@@ -61,36 +65,79 @@ export async function listIncidents(
   );
   conditions.push(locationScope.sql);
   params.push(...locationScope.params);
-  if (view === "triage") {
+  if (filters.view === "triage") {
     conditions.push("incident.status IN ('NEW','IN_TRIAGE','ACCEPTED')");
-  } else if (view === "new") {
+  } else if (filters.view === "new") {
     conditions.push("incident.status = 'NEW'");
-  } else if (view === "converted") {
+  } else if (filters.view === "converted") {
     conditions.push("incident.status = 'CONVERTED'");
   }
-  if (query) {
-    const like = `%${query}%`;
+  if (filters.query) {
+    const like = `%${filters.query}%`;
     conditions.push(
       "(incident.number LIKE ? OR incident.title LIKE ? OR asset.code LIKE ? OR location.name LIKE ?)",
     );
     params.push(like, like, like, like);
   }
-  if (status) {
+  if (exclude !== "status" && filters.status) {
     conditions.push("incident.status = ?");
-    params.push(status);
+    params.push(filters.status);
   }
-  if (severity) {
+  if (exclude !== "severity" && filters.severity) {
     conditions.push("incident.severity = ?");
-    params.push(severity);
+    params.push(filters.severity);
   }
-  const where = conditions.join(" AND ");
-  const [count, items, counts] = await Promise.all([
+  return { conditions, params };
+}
+
+async function getIncidentFacets(
+  scope: TenantScope,
+  filters: NormalizedIncidentFilters,
+): Promise<IncidentListData["facets"]> {
+  const status = incidentConditions(scope, filters, "status");
+  const severity = incidentConditions(scope, filters, "severity");
+  const from = `FROM incidents incident
+    INNER JOIN functional_locations location ON location.id = incident.functional_location_id
+    LEFT JOIN assets asset ON asset.id = incident.asset_id`;
+  const [statuses, severities] = await Promise.all([
+    queryAll<FacetOption>(
+      `SELECT incident.status AS value, COUNT(*) AS count ${from}
+       WHERE ${status.conditions.join(" AND ")} GROUP BY incident.status`,
+      status.params,
+    ),
+    queryAll<FacetOption>(
+      `SELECT incident.severity AS value, COUNT(*) AS count ${from}
+       WHERE ${severity.conditions.join(" AND ")} GROUP BY incident.severity`,
+      severity.params,
+    ),
+  ]);
+  return { statuses, severities };
+}
+
+export async function listIncidents(
+  scope: TenantScope,
+  filters: IncidentFilters,
+): Promise<IncidentListData> {
+  const page = normalizePage(filters.page);
+  const normalized: NormalizedIncidentFilters = {
+    query: normalizeQuery(filters.q),
+    status: normalizeQuery(filters.status, 30),
+    severity: normalizeQuery(filters.severity, 20),
+    view: normalizeQuery(filters.view, 20) || "triage",
+  };
+  const filtered = incidentConditions(scope, normalized);
+  const where = filtered.conditions.join(" AND ");
+  const locationScope = locationScopePredicate(
+    scope,
+    "incident.functional_location_id",
+  );
+  const [count, items, counts, facets] = await Promise.all([
     queryFirst<{ count: number }>(
       `SELECT COUNT(*) AS count FROM incidents incident
        INNER JOIN functional_locations location ON location.id = incident.functional_location_id
        LEFT JOIN assets asset ON asset.id = incident.asset_id
        WHERE ${where}`,
-      params,
+      filtered.params,
     ),
     queryAll<IncidentListItem>(
       `SELECT incident.id, incident.number, incident.title, incident.severity,
@@ -109,7 +156,7 @@ export async function listIncidents(
          CASE incident.severity WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END,
          incident.reported_at DESC, incident.number DESC
        LIMIT ? OFFSET ?`,
-      [...params, PAGE_SIZE, (page - 1) * PAGE_SIZE],
+      [...filtered.params, PAGE_SIZE, (page - 1) * PAGE_SIZE],
     ),
     queryFirst<{
       newCount: number;
@@ -126,6 +173,7 @@ export async function listIncidents(
          AND ${locationScope.sql}`,
       [scope.organizationId, scope.siteId, ...locationScope.params],
     ),
+    getIncidentFacets(scope, normalized),
   ]);
   const total = Number(count?.count ?? 0);
   return {
@@ -134,13 +182,14 @@ export async function listIncidents(
     page,
     pageSize: PAGE_SIZE,
     totalPages: Math.max(1, Math.ceil(total / PAGE_SIZE)),
-    query,
+    query: normalized.query,
     counts: {
       new: Number(counts?.newCount ?? 0),
       triage: Number(counts?.triage ?? 0),
       accepted: Number(counts?.accepted ?? 0),
       all: Number(counts?.allCount ?? 0),
     },
+    facets,
   };
 }
 

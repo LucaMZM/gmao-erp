@@ -1,4 +1,5 @@
 import { tenantScope } from "@/lib/server/repositories/shared";
+import { env } from "cloudflare:workers";
 import {
   Activity,
   ArrowDownRight,
@@ -90,7 +91,10 @@ export default async function ReliabilityPage({
   const session = await requireDemoSession();
   if (!hasPermission(session.permissionCodes, "reliability.rca.manage"))
     redirect("/overview");
-  const data = await getReliabilityCenter(tenantScope(session));
+  const data = await getReliabilityCenter(
+    tenantScope(session),
+    env.MAZMI_TEST_NOW,
+  );
   const actors = sortedActors(data.badActors, sort).slice(0, 10);
   const paretoRows =
     pareto === "area"

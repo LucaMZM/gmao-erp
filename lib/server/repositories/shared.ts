@@ -4,6 +4,10 @@ import type { DemoUserSession } from "../auth";
 import type { EnterprisePermission } from "@/lib/domain/governance";
 
 export type SqlValue = string | number | null;
+export type FacetOption = {
+  value: string;
+  count: number;
+};
 export type TenantScope = {
   organizationId: string;
   siteId: string;

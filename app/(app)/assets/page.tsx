@@ -1,27 +1,26 @@
-import {
-  Boxes,
-  GitBranch,
-  List,
-  Search,
-  SlidersHorizontal,
-} from "lucide-react";
+import { Boxes, List, ListTree, Search, SlidersHorizontal } from "lucide-react";
 import Link from "next/link";
+import { AssetTable } from "@/components/assets/asset-table";
 import { EmptyState } from "@/components/ui/empty-state";
-import { HealthIndicator } from "@/components/ui/health-indicator";
+import { FacetedFilterForm } from "@/components/ui/faceted-filter-form";
 import { PageHeader } from "@/components/ui/page-header";
 import { Pagination } from "@/components/ui/pagination";
-import { StatusBadge } from "@/components/ui/status-badge";
-import {
-  criticalityLabels,
-  formatDate,
-  statusLabels,
-} from "@/lib/presentation";
+import { criticalityLabels, statusLabels } from "@/lib/presentation";
 import { requireDemoSession } from "@/lib/server/auth";
 import {
   type AssetFilters,
   listAssets,
 } from "@/lib/server/repositories/assets";
 import { tenantScope } from "@/lib/server/repositories/shared";
+
+const assetStatuses = [
+  "OPERATING",
+  "DEGRADED",
+  "DOWN",
+  "MAINTENANCE",
+  "STANDBY",
+];
+const assetCriticalities = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 
 export default async function AssetsPage({
   searchParams,
@@ -32,15 +31,42 @@ export default async function AssetsPage({
   const session = await requireDemoSession();
   const data = await listAssets(tenantScope(session), filters);
   const view = typeof filters.view === "string" ? filters.view : "list";
-  const items =
-    view === "hierarchy"
-      ? [...data.items].sort(
-          (a, b) =>
-            (a.parentCode ?? a.code).localeCompare(b.parentCode ?? b.code) ||
-            Number(Boolean(a.parentCode)) - Number(Boolean(b.parentCode)) ||
-            a.code.localeCompare(b.code),
-        )
-      : data.items;
+  const area = typeof filters.area === "string" ? filters.area : "";
+  const status = typeof filters.status === "string" ? filters.status : "";
+  const criticality =
+    typeof filters.criticality === "string" ? filters.criticality : "";
+  const health = typeof filters.health === "string" ? filters.health : "";
+  const areaLabels = new Map(
+    data.facets.areas.map((item) => [item.value, item.label]),
+  );
+  const activeFilters = [
+    data.query ? { key: "q", label: `Búsqueda: ${data.query}` } : null,
+    area
+      ? { key: "area", label: `Área: ${areaLabels.get(area) ?? area}` }
+      : null,
+    status
+      ? { key: "status", label: `Estado: ${statusLabels[status] ?? status}` }
+      : null,
+    criticality
+      ? {
+          key: "criticality",
+          label: `Criticidad: ${criticalityLabels[criticality] ?? criticality}`,
+        }
+      : null,
+    health
+      ? {
+          key: "health",
+          label: `Salud: ${health === "RISK" ? "Riesgo" : health === "WATCH" ? "Vigilar" : "Estable"}`,
+        }
+      : null,
+  ].filter((item): item is { key: string; label: string } => item !== null);
+  const availableStatuses = new Set(
+    data.facets.statuses.map((item) => item.value),
+  );
+  const availableCriticalities = new Set(
+    data.facets.criticalities.map((item) => item.value),
+  );
+  const availableHealth = new Set(data.facets.health.map((item) => item.value));
 
   return (
     <div className="page-stack assets-page">
@@ -57,9 +83,11 @@ export default async function AssetsPage({
           </div>
         }
       />
-
       <section className="toolbar-panel">
-        <form className="filter-form" method="get">
+        <FacetedFilterForm
+          activeFilters={activeFilters}
+          preserveOnClear={["view"]}
+        >
           <label className="search-field">
             <Search size={16} />
             <input
@@ -68,65 +96,84 @@ export default async function AssetsPage({
               placeholder="Código, activo, fabricante o modelo"
             />
           </label>
-          <select
-            aria-label="Filtrar por área"
-            defaultValue={typeof filters.area === "string" ? filters.area : ""}
-            name="area"
-          >
+          <select aria-label="Filtrar por área" defaultValue={area} name="area">
             <option value="">Todas las áreas</option>
-            {data.areas.map((area) => (
-              <option key={area.code} value={area.code}>
-                {area.name}
+            {area && !areaLabels.has(area) ? (
+              <option disabled value={area}>
+                {area} · sin coincidencias
+              </option>
+            ) : null}
+            {data.facets.areas.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
               </option>
             ))}
           </select>
           <select
             aria-label="Filtrar por estado"
-            defaultValue={
-              typeof filters.status === "string" ? filters.status : ""
-            }
+            defaultValue={status}
             name="status"
           >
             <option value="">Todos los estados</option>
-            {["OPERATING", "DEGRADED", "DOWN", "MAINTENANCE", "STANDBY"].map(
-              (status) => (
-                <option key={status} value={status}>
-                  {statusLabels[status]}
+            {status && !availableStatuses.has(status) ? (
+              <option disabled value={status}>
+                {statusLabels[status] ?? status} · sin coincidencias
+              </option>
+            ) : null}
+            {assetStatuses
+              .filter((item) => availableStatuses.has(item))
+              .map((item) => (
+                <option key={item} value={item}>
+                  {statusLabels[item]}
                 </option>
-              ),
-            )}
+              ))}
           </select>
           <select
             aria-label="Filtrar por criticidad"
-            defaultValue={
-              typeof filters.criticality === "string" ? filters.criticality : ""
-            }
+            defaultValue={criticality}
             name="criticality"
           >
             <option value="">Toda criticidad</option>
-            {["CRITICAL", "HIGH", "MEDIUM", "LOW"].map((item) => (
-              <option key={item} value={item}>
-                {criticalityLabels[item]}
+            {criticality && !availableCriticalities.has(criticality) ? (
+              <option disabled value={criticality}>
+                {criticalityLabels[criticality] ?? criticality} · sin
+                coincidencias
               </option>
-            ))}
+            ) : null}
+            {assetCriticalities
+              .filter((item) => availableCriticalities.has(item))
+              .map((item) => (
+                <option key={item} value={item}>
+                  {criticalityLabels[item]}
+                </option>
+              ))}
           </select>
           <select
             aria-label="Filtrar por salud"
-            defaultValue={
-              typeof filters.health === "string" ? filters.health : ""
-            }
+            defaultValue={health}
             name="health"
           >
             <option value="">Cualquier salud</option>
-            <option value="RISK">Riesgo · &lt;70</option>
-            <option value="WATCH">Vigilar · 70–84</option>
-            <option value="HEALTHY">Estable · ≥85</option>
+            {health && !availableHealth.has(health) ? (
+              <option disabled value={health}>
+                Filtro actual · sin coincidencias
+              </option>
+            ) : null}
+            {availableHealth.has("RISK") ? (
+              <option value="RISK">Riesgo · &lt;70</option>
+            ) : null}
+            {availableHealth.has("WATCH") ? (
+              <option value="WATCH">Vigilar · 70–84</option>
+            ) : null}
+            {availableHealth.has("HEALTHY") ? (
+              <option value="HEALTHY">Estable · ≥85</option>
+            ) : null}
           </select>
           <input name="view" type="hidden" value={view} />
           <button className="filter-submit" type="submit">
             <SlidersHorizontal size={15} /> Aplicar
           </button>
-        </form>
+        </FacetedFilterForm>
         <div className="view-switch" aria-label="Vista de activos">
           <Link
             className={view !== "hierarchy" ? "active" : ""}
@@ -144,109 +191,20 @@ export default async function AssetsPage({
               query: { ...filters, view: "hierarchy", page: undefined },
             }}
           >
-            <GitBranch size={15} /> Jerarquía
+            <ListTree size={15} /> Jerarquía
           </Link>
         </div>
       </section>
-
       <section className="data-panel table-panel">
-        {items.length ? (
-          <div className="table-scroll">
-            <table className="data-table asset-table">
-              <thead>
-                <tr>
-                  <th>Activo</th>
-                  <th>Contexto industrial</th>
-                  <th>Clase</th>
-                  <th>Estado</th>
-                  <th>Criticidad</th>
-                  <th>Salud</th>
-                  <th>OT</th>
-                  <th>Último mant.</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((asset) => {
-                  const healthTone =
-                    Number(asset.healthScore) < 65
-                      ? "critical"
-                      : Number(asset.healthScore) < 80
-                        ? "warning"
-                        : "good";
-                  return (
-                    <tr
-                      className={[
-                        view === "hierarchy" && asset.parentCode
-                          ? "child-row"
-                          : "",
-                        `health-${healthTone}`,
-                        `criticality-${asset.criticality.toLowerCase()}`,
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                      key={asset.id}
-                    >
-                      <td data-label="Activo">
-                        <Link
-                          className="entity-cell"
-                          href={`/assets/${encodeURIComponent(asset.code)}`}
-                        >
-                          <span className="asset-mini-token">
-                            {asset.code.split("-")[0]}
-                          </span>
-                          <span>
-                            <small>{asset.code}</small>
-                            <strong>{asset.name}</strong>
-                            {asset.parentCode ? (
-                              <em>Componente de {asset.parentCode}</em>
-                            ) : null}
-                          </span>
-                        </Link>
-                      </td>
-                      <td data-label="Contexto">
-                        <span className="stacked-cell">
-                          <strong>{asset.locationName}</strong>
-                          <small>{asset.locationCode}</small>
-                        </span>
-                      </td>
-                      <td data-label="Clase">{asset.className}</td>
-                      <td data-label="Estado">
-                        <StatusBadge value={asset.status} />
-                      </td>
-                      <td data-label="Criticidad">
-                        <StatusBadge
-                          kind="criticality"
-                          value={asset.criticality}
-                        />
-                      </td>
-                      <td data-label="Salud">
-                        <HealthIndicator
-                          compact
-                          score={Number(asset.healthScore)}
-                        />
-                      </td>
-                      <td data-label="OT">
-                        <span
-                          className={
-                            Number(asset.openOrders)
-                              ? "numeric-chip active"
-                              : "numeric-chip"
-                          }
-                        >
-                          {asset.openOrders}
-                        </span>
-                      </td>
-                      <td data-label="Último mantenimiento">
-                        <span className="date-cell">
-                          {formatDate(asset.lastMaintenanceAt)}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+        {data.items.length ? (
+          <AssetTable
+            autoExpand={Boolean(
+              data.query || area || status || criticality || health,
+            )}
+            hierarchy={view === "hierarchy"}
+            items={data.items}
+            key={`${view}:${data.query}:${area}:${status}:${criticality}:${health}:${data.page}`}
+          />
         ) : (
           <EmptyState
             action={

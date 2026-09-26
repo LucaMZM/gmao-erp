@@ -63,8 +63,14 @@ import {
 } from "@/lib/server/repositories/reliability";
 import { getPlannerData } from "@/lib/server/repositories/planner";
 import { listInventory } from "@/lib/server/repositories/inventory";
+import { listAssets } from "@/lib/server/repositories/assets";
+import { listWorkOrders } from "@/lib/server/repositories/work-orders";
+import { listIncidents } from "@/lib/server/repositories/incidents";
 import { getMyWork } from "@/lib/server/repositories/field";
-import { getAuditEntries } from "@/lib/server/repositories/governance";
+import {
+  getAuditEntries,
+  getAuditFacets,
+} from "@/lib/server/repositories/governance";
 import {
   createShiftHandover,
   createEvidenceMetadata,
@@ -831,6 +837,66 @@ describe("independent audit — persisted boundaries", () => {
     ]) {
       expect(JSON.stringify(data)).not.toContain("LM-02");
     }
+  });
+
+  it("facets apply every active condition except their own", async () => {
+    const scope = tenantScope(manager);
+    const assets = await listAssets(scope, {
+      area: "LAM",
+      status: "DEGRADED",
+    });
+    expect(assets.items.every((item) => item.status === "DEGRADED")).toBe(true);
+    expect(assets.facets.statuses.map((item) => item.value)).toContain(
+      "OPERATING",
+    );
+    expect(assets.facets.areas.map((item) => item.value)).toContain("LAM");
+    const hierarchy = await listAssets(scope, {
+      view: "hierarchy",
+      q: "LM-02-APP",
+    });
+    expect(hierarchy.items.map((item) => item.code)).toEqual([
+      "LM-02",
+      "LM-02-APP",
+    ]);
+    expect(hierarchy.items[1]?.parentId).toBe(hierarchy.items[0]?.id);
+    expect(new Set(hierarchy.items.map((item) => item.id)).size).toBe(
+      hierarchy.items.length,
+    );
+
+    const orders = await listWorkOrders(scope, {
+      view: "all",
+      priority: "P2_URGENT",
+      type: "CORRECTIVE",
+    });
+    expect(orders.items.every((item) => item.priority === "P2_URGENT")).toBe(
+      true,
+    );
+    expect(orders.facets.priorities.length).toBeGreaterThan(0);
+    expect(orders.facets.types.map((item) => item.value)).toContain(
+      "CORRECTIVE",
+    );
+
+    const incidents = await listIncidents(scope, {
+      view: "all",
+      severity: "HIGH",
+    });
+    expect(incidents.items.every((item) => item.severity === "HIGH")).toBe(
+      true,
+    );
+    expect(incidents.facets.severities.map((item) => item.value)).toContain(
+      "HIGH",
+    );
+
+    const inventory = await listInventory(scope, { critical: "1" });
+    expect(inventory.items.every((item) => Number(item.critical) === 1)).toBe(
+      true,
+    );
+    expect(inventory.facets.categories.length).toBeGreaterThan(0);
+    expect(inventory.facets.criticalCount).toBeGreaterThan(0);
+
+    const audit = await getAuditFacets(manager, { outcome: "SUCCESS" });
+    expect(audit.outcomes.map((item) => item.value)).toContain("SUCCESS");
+    expect(audit.entities.length).toBeGreaterThan(0);
   });
 
   it("My Work removes assignments and handovers after area scope is revoked", async () => {

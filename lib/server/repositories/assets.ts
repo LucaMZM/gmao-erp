@@ -1,4 +1,4 @@
-import type { SqlValue, TenantScope } from "./shared";
+import type { FacetOption, SqlValue, TenantScope } from "./shared";
 import {
   locationScopePredicate,
   normalizePage,
@@ -25,7 +25,9 @@ export type AssetListItem = {
   className: string;
   manufacturer: string | null;
   model: string | null;
+  parentId: string | null;
   parentCode: string | null;
+  isContext: number;
   openOrders: number;
   lastMaintenanceAt: string | null;
 };
@@ -48,18 +50,29 @@ export type AssetListData = {
   totalPages: number;
   query: string;
   areas: Array<{ code: string; name: string }>;
+  facets: {
+    areas: Array<FacetOption & { label: string }>;
+    statuses: FacetOption[];
+    criticalities: FacetOption[];
+    health: FacetOption[];
+  };
 };
 
-export async function listAssets(
+type NormalizedAssetFilters = {
+  query: string;
+  status: string;
+  criticality: string;
+  area: string;
+  health: string;
+};
+
+type AssetFacet = "area" | "status" | "criticality" | "health";
+
+function assetConditions(
   scope: TenantScope,
-  filters: AssetFilters,
-): Promise<AssetListData> {
-  const page = normalizePage(filters.page);
-  const query = normalizeQuery(filters.q);
-  const status = normalizeQuery(filters.status, 30);
-  const criticality = normalizeQuery(filters.criticality, 20);
-  const area = normalizeQuery(filters.area, 30);
-  const health = normalizeQuery(filters.health, 20);
+  filters: NormalizedAssetFilters,
+  exclude?: AssetFacet,
+): { conditions: string[]; params: SqlValue[] } {
   const conditions = ["asset.site_id = ?", "asset.status != 'RETIRED'"];
   const params: SqlValue[] = [scope.siteId];
   const locationScope = locationScopePredicate(
@@ -68,99 +81,225 @@ export async function listAssets(
   );
   conditions.push(locationScope.sql);
   params.push(...locationScope.params);
-
-  if (query) {
+  if (filters.query) {
     conditions.push(
       "(asset.code LIKE ? OR asset.name LIKE ? OR asset.manufacturer LIKE ? OR asset.model LIKE ?)",
     );
-    const like = `%${query}%`;
+    const like = `%${filters.query}%`;
     params.push(like, like, like, like);
   }
-  if (status) {
+  if (exclude !== "status" && filters.status) {
     conditions.push("asset.status = ?");
-    params.push(status);
+    params.push(filters.status);
   }
-  if (criticality) {
+  if (exclude !== "criticality" && filters.criticality) {
     conditions.push("asset.criticality = ?");
-    params.push(criticality);
+    params.push(filters.criticality);
   }
-  if (area) {
+  if (exclude !== "area" && filters.area) {
     conditions.push("(location.code = ? OR parent_location.code = ?)");
-    params.push(area, area);
+    params.push(filters.area, filters.area);
   }
-  if (health === "RISK") conditions.push("asset.health_score < 70");
-  if (health === "WATCH")
-    conditions.push("asset.health_score >= 70 AND asset.health_score < 85");
-  if (health === "HEALTHY") conditions.push("asset.health_score >= 85");
+  if (exclude !== "health") {
+    if (filters.health === "RISK") conditions.push("asset.health_score < 70");
+    if (filters.health === "WATCH")
+      conditions.push("asset.health_score >= 70 AND asset.health_score < 85");
+    if (filters.health === "HEALTHY")
+      conditions.push("asset.health_score >= 85");
+  }
+  return { conditions, params };
+}
 
-  const where = conditions.join(" AND ");
-  const count = await queryFirst<{ count: number }>(
-    `
-    SELECT COUNT(*) AS count
-    FROM assets asset
-    INNER JOIN functional_locations location ON location.id = asset.functional_location_id
-    LEFT JOIN functional_locations parent_location ON parent_location.id = location.parent_id
-    WHERE ${where}
-  `,
-    params,
-  );
-  const total = Number(count?.count ?? 0);
+const ASSET_FROM = `
+  FROM assets asset
+  INNER JOIN functional_locations location ON location.id = asset.functional_location_id
+  LEFT JOIN functional_locations parent_location ON parent_location.id = location.parent_id
+`;
 
-  const items = await queryAll<AssetListItem>(
-    `
-    SELECT
-      asset.id,
-      asset.code,
-      asset.name,
-      asset.status,
-      asset.criticality,
-      asset.health_score AS healthScore,
-      asset.kind,
-      location.code AS locationCode,
-      location.name AS locationName,
-      class.name AS className,
-      asset.manufacturer,
-      asset.model,
-      parent_asset.code AS parentCode,
-      COUNT(DISTINCT CASE WHEN wo.status IN ${OPEN_STATES} THEN wo.id END) AS openOrders,
-      MAX(CASE WHEN wo.status IN ('COMPLETED','CLOSED') THEN wo.actual_end END) AS lastMaintenanceAt
-    FROM assets asset
-    INNER JOIN functional_locations location ON location.id = asset.functional_location_id
-    LEFT JOIN functional_locations parent_location ON parent_location.id = location.parent_id
+async function getAssetFacets(
+  scope: TenantScope,
+  filters: NormalizedAssetFilters,
+): Promise<AssetListData["facets"]> {
+  const area = assetConditions(scope, filters, "area");
+  const status = assetConditions(scope, filters, "status");
+  const criticality = assetConditions(scope, filters, "criticality");
+  const health = assetConditions(scope, filters, "health");
+  const [areas, statuses, criticalities, healthOptions] = await Promise.all([
+    queryAll<FacetOption & { label: string }>(
+      `SELECT COALESCE(parent_location.code, location.code) AS value,
+        COALESCE(parent_location.name, location.name) AS label,
+        COUNT(DISTINCT asset.id) AS count
+       ${ASSET_FROM}
+       WHERE ${area.conditions.join(" AND ")}
+       GROUP BY value, label ORDER BY label`,
+      area.params,
+    ),
+    queryAll<FacetOption>(
+      `SELECT asset.status AS value, COUNT(*) AS count ${ASSET_FROM}
+       WHERE ${status.conditions.join(" AND ")}
+       GROUP BY asset.status`,
+      status.params,
+    ),
+    queryAll<FacetOption>(
+      `SELECT asset.criticality AS value, COUNT(*) AS count ${ASSET_FROM}
+       WHERE ${criticality.conditions.join(" AND ")}
+       GROUP BY asset.criticality`,
+      criticality.params,
+    ),
+    queryAll<FacetOption>(
+      `SELECT CASE
+          WHEN asset.health_score < 70 THEN 'RISK'
+          WHEN asset.health_score < 85 THEN 'WATCH'
+          ELSE 'HEALTHY'
+        END AS value, COUNT(*) AS count
+       ${ASSET_FROM}
+       WHERE ${health.conditions.join(" AND ")}
+       GROUP BY value`,
+      health.params,
+    ),
+  ]);
+  return { areas, statuses, criticalities, health: healthOptions };
+}
+
+export async function listAssets(
+  scope: TenantScope,
+  filters: AssetFilters,
+): Promise<AssetListData> {
+  const page = normalizePage(filters.page);
+  const normalized: NormalizedAssetFilters = {
+    query: normalizeQuery(filters.q),
+    status: normalizeQuery(filters.status, 30),
+    criticality: normalizeQuery(filters.criticality, 20),
+    area: normalizeQuery(filters.area, 30),
+    health: normalizeQuery(filters.health, 20),
+  };
+  const view = normalizeQuery(filters.view, 20) || "list";
+  const filtered = assetConditions(scope, normalized);
+  const where = filtered.conditions.join(" AND ");
+  const select = `SELECT
+      asset.id, asset.code, asset.name, asset.status, asset.criticality,
+      asset.health_score AS healthScore, asset.kind,
+      location.code AS locationCode, location.name AS locationName,
+      class.name AS className, asset.manufacturer, asset.model,
+      asset.parent_asset_id AS parentId, parent_asset.code AS parentCode,
+      0 AS isContext,
+      (SELECT COUNT(*) FROM work_orders wo
+        WHERE wo.asset_id = asset.id AND wo.status IN ${OPEN_STATES}) AS openOrders,
+      (SELECT MAX(wo.actual_end) FROM work_orders wo
+        WHERE wo.asset_id = asset.id AND wo.status IN ('COMPLETED','CLOSED')) AS lastMaintenanceAt`;
+  const joins = `${ASSET_FROM}
     INNER JOIN asset_classes class ON class.id = asset.asset_class_id
-    LEFT JOIN assets parent_asset ON parent_asset.id = asset.parent_asset_id
-    LEFT JOIN work_orders wo ON wo.asset_id = asset.id
-    WHERE ${where}
-    GROUP BY asset.id
-    ORDER BY
-      CASE asset.criticality WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END,
-      asset.health_score ASC,
-      asset.code ASC
-    LIMIT ? OFFSET ?
-  `,
-    [...params, PAGE_SIZE, (page - 1) * PAGE_SIZE],
-  );
+    LEFT JOIN assets parent_asset ON parent_asset.id = asset.parent_asset_id`;
+  const [count, facets] = await Promise.all([
+    queryFirst<{ count: number }>(
+      `SELECT COUNT(*) AS count ${ASSET_FROM} WHERE ${where}`,
+      filtered.params,
+    ),
+    getAssetFacets(scope, normalized),
+  ]);
+  const total = Number(count?.count ?? 0);
+  let totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  let items: AssetListItem[];
 
-  const areaScope = locationScopePredicate(scope, "location.id");
-  const areas = await queryAll<{ code: string; name: string }>(
-    `
-    SELECT location.code, location.name
-    FROM functional_locations location
-    WHERE location.site_id = ? AND location.parent_id IS NULL AND location.status = 'ACTIVE'
-      AND ${areaScope.sql}
-    ORDER BY location.sort_order, location.name
-  `,
-    [scope.siteId, ...areaScope.params],
-  );
+  if (view === "hierarchy") {
+    const base = assetConditions(scope, {
+      query: "",
+      status: "",
+      criticality: "",
+      area: "",
+      health: "",
+    });
+    const matching = assetConditions(scope, normalized);
+    const rootCount = await queryFirst<{ count: number }>(
+      `WITH RECURSIVE
+       scoped_assets AS (
+         SELECT asset.id, asset.parent_asset_id
+         ${ASSET_FROM}
+         WHERE ${base.conditions.join(" AND ")}
+       ),
+       roots(node_id, root_id) AS (
+         SELECT id, id FROM scoped_assets WHERE parent_asset_id IS NULL
+         UNION ALL
+         SELECT child.id, root.root_id FROM scoped_assets child
+         INNER JOIN roots root ON child.parent_asset_id = root.node_id
+       ),
+       matching AS (
+         SELECT asset.id ${ASSET_FROM}
+         WHERE ${matching.conditions.join(" AND ")}
+       )
+       SELECT COUNT(DISTINCT roots.root_id) AS count
+       FROM matching INNER JOIN roots ON roots.node_id = matching.id`,
+      [...base.params, ...matching.params],
+    );
+    totalPages = Math.max(
+      1,
+      Math.ceil(Number(rootCount?.count ?? 0) / PAGE_SIZE),
+    );
+    items = await queryAll<AssetListItem>(
+      `WITH RECURSIVE
+       scoped_assets AS (
+         SELECT asset.id, asset.parent_asset_id
+         ${ASSET_FROM}
+         WHERE ${base.conditions.join(" AND ")}
+       ),
+       roots(node_id, root_id) AS (
+         SELECT id, id FROM scoped_assets WHERE parent_asset_id IS NULL
+         UNION ALL
+         SELECT child.id, root.root_id FROM scoped_assets child
+         INNER JOIN roots root ON child.parent_asset_id = root.node_id
+       ),
+       matching AS (
+         SELECT asset.id ${ASSET_FROM}
+         WHERE ${matching.conditions.join(" AND ")}
+       ),
+       page_roots AS (
+         SELECT roots.root_id
+         FROM matching INNER JOIN roots ON roots.node_id = matching.id
+         INNER JOIN assets root_asset ON root_asset.id = roots.root_id
+         GROUP BY roots.root_id, root_asset.code
+         ORDER BY root_asset.code
+         LIMIT ? OFFSET ?
+       ),
+       included(id) AS (
+         SELECT matching.id FROM matching
+         INNER JOIN roots ON roots.node_id = matching.id
+         INNER JOIN page_roots ON page_roots.root_id = roots.root_id
+         UNION
+         SELECT scoped.parent_asset_id FROM scoped_assets scoped
+         INNER JOIN included child ON child.id = scoped.id
+         WHERE scoped.parent_asset_id IS NOT NULL
+       )
+       ${select.replace("0 AS isContext", "CASE WHEN matching.id IS NULL THEN 1 ELSE 0 END AS isContext")}
+       ${joins}
+       INNER JOIN included ON included.id = asset.id
+       LEFT JOIN matching ON matching.id = asset.id
+       ORDER BY asset.code`,
+      [...base.params, ...matching.params, PAGE_SIZE, (page - 1) * PAGE_SIZE],
+    );
+  } else {
+    items = await queryAll<AssetListItem>(
+      `${select} ${joins}
+       WHERE ${where}
+       ORDER BY
+         CASE asset.criticality WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END,
+         asset.health_score ASC, asset.code ASC
+       LIMIT ? OFFSET ?`,
+      [...filtered.params, PAGE_SIZE, (page - 1) * PAGE_SIZE],
+    );
+  }
 
   return {
     items,
     total,
     page,
     pageSize: PAGE_SIZE,
-    totalPages: Math.max(1, Math.ceil(total / PAGE_SIZE)),
-    query,
-    areas,
+    totalPages,
+    query: normalized.query,
+    areas: facets.areas.map(({ value, label }) => ({
+      code: value,
+      name: label,
+    })),
+    facets,
   };
 }
 
@@ -193,6 +332,7 @@ export type AssetDetail = {
 
 export type AssetChild = {
   id: string;
+  parentId: string;
   code: string;
   name: string;
   status: string;
@@ -336,6 +476,10 @@ export async function getAssetDetail(
     [scope.organizationId, scope.siteId, code, ...locationScope.params],
   );
   if (!asset) return null;
+  const childLocationScope = locationScopePredicate(
+    scope,
+    "child.functional_location_id",
+  );
 
   const [
     children,
@@ -352,14 +496,26 @@ export async function getAssetDetail(
   ] = await Promise.all([
     queryAll<AssetChild>(
       `
-      SELECT child.id, child.code, child.name, child.status,
+      WITH RECURSIVE descendants AS (
+        SELECT child.id, child.parent_asset_id
+        FROM assets child
+        WHERE child.parent_asset_id = ? AND child.site_id = ?
+        UNION ALL
+        SELECT child.id, child.parent_asset_id
+        FROM assets child
+        INNER JOIN descendants parent ON child.parent_asset_id = parent.id
+        WHERE child.site_id = ?
+      )
+      SELECT child.id, child.parent_asset_id AS parentId,
+        child.code, child.name, child.status,
         child.health_score AS healthScore, child.criticality, class.name AS className
-      FROM assets child
+      FROM descendants
+      INNER JOIN assets child ON child.id = descendants.id
       INNER JOIN asset_classes class ON class.id = child.asset_class_id
-      WHERE child.parent_asset_id = ?
+      WHERE ${childLocationScope.sql}
       ORDER BY child.code
     `,
-      [asset.id],
+      [asset.id, scope.siteId, scope.siteId, ...childLocationScope.params],
     ),
     queryAll<AssetOrder>(
       `

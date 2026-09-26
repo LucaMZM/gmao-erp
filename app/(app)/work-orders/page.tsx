@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { EmptyState } from "@/components/ui/empty-state";
+import { FacetedFilterForm } from "@/components/ui/faceted-filter-form";
 import { PageHeader } from "@/components/ui/page-header";
 import { Pagination } from "@/components/ui/pagination";
 import { StatusBadge } from "@/components/ui/status-badge";
@@ -36,6 +37,39 @@ export default async function WorkOrdersPage({
   const session = await requireDemoSession();
   const data = await listWorkOrders(tenantScope(session), filters);
   const view = typeof filters.view === "string" ? filters.view : "attention";
+  const selectedStatus =
+    typeof filters.status === "string" ? filters.status : "";
+  const selectedPriority =
+    typeof filters.priority === "string" ? filters.priority : "";
+  const selectedType = typeof filters.type === "string" ? filters.type : "";
+  const availableStatuses = new Set(
+    data.facets.statuses.map((item) => item.value),
+  );
+  const availablePriorities = new Set(
+    data.facets.priorities.map((item) => item.value),
+  );
+  const availableTypes = new Set(data.facets.types.map((item) => item.value));
+  const activeFilters = [
+    data.query ? { key: "q", label: `Búsqueda: ${data.query}` } : null,
+    selectedStatus
+      ? {
+          key: "status",
+          label: `Estado: ${statusLabels[selectedStatus] ?? selectedStatus}`,
+        }
+      : null,
+    selectedPriority
+      ? {
+          key: "priority",
+          label: `Prioridad: ${priorityLabels[selectedPriority] ?? selectedPriority}`,
+        }
+      : null,
+    selectedType
+      ? {
+          key: "type",
+          label: `Tipo: ${typeLabels[selectedType] ?? selectedType}`,
+        }
+      : null,
+  ].filter((item): item is { key: string; label: string } => item !== null);
   const viewLinks = [
     {
       key: "attention",
@@ -92,7 +126,11 @@ export default async function WorkOrdersPage({
       </nav>
 
       <section className="toolbar-panel">
-        <form className="filter-form work-filter-form" method="get">
+        <FacetedFilterForm
+          activeFilters={activeFilters}
+          className="work-filter-form"
+          preserveOnClear={["view"]}
+        >
           <label className="search-field">
             <Search size={16} />
             <input
@@ -103,12 +141,16 @@ export default async function WorkOrdersPage({
           </label>
           <select
             aria-label="Filtrar por estado"
-            defaultValue={
-              typeof filters.status === "string" ? filters.status : ""
-            }
+            defaultValue={selectedStatus}
             name="status"
           >
             <option value="">Todos los estados</option>
+            {selectedStatus && !availableStatuses.has(selectedStatus) ? (
+              <option disabled value={selectedStatus}>
+                {statusLabels[selectedStatus] ?? selectedStatus} · sin
+                coincidencias
+              </option>
+            ) : null}
             {[
               "REQUESTED",
               "TRIAGE",
@@ -123,43 +165,58 @@ export default async function WorkOrdersPage({
               "COMPLETED",
               "CLOSED",
               "CANCELLED",
-            ].map((status) => (
-              <option key={status} value={status}>
-                {statusLabels[status]}
-              </option>
-            ))}
+            ]
+              .filter((status) => availableStatuses.has(status))
+              .map((status) => (
+                <option key={status} value={status}>
+                  {statusLabels[status]}
+                </option>
+              ))}
           </select>
           <select
             aria-label="Filtrar por prioridad"
-            defaultValue={
-              typeof filters.priority === "string" ? filters.priority : ""
-            }
+            defaultValue={selectedPriority}
             name="priority"
           >
             <option value="">Toda prioridad</option>
-            {Object.entries(priorityLabels).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
+            {selectedPriority && !availablePriorities.has(selectedPriority) ? (
+              <option disabled value={selectedPriority}>
+                {priorityLabels[selectedPriority] ?? selectedPriority} · sin
+                coincidencias
               </option>
-            ))}
+            ) : null}
+            {Object.entries(priorityLabels)
+              .filter(([value]) => availablePriorities.has(value))
+              .map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
           </select>
           <select
             aria-label="Filtrar por tipo"
-            defaultValue={typeof filters.type === "string" ? filters.type : ""}
+            defaultValue={selectedType}
             name="type"
           >
             <option value="">Todos los tipos</option>
-            {Object.entries(typeLabels).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
+            {selectedType && !availableTypes.has(selectedType) ? (
+              <option disabled value={selectedType}>
+                {typeLabels[selectedType] ?? selectedType} · sin coincidencias
               </option>
-            ))}
+            ) : null}
+            {Object.entries(typeLabels)
+              .filter(([value]) => availableTypes.has(value))
+              .map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
           </select>
           <input name="view" type="hidden" value={view} />
           <button className="filter-submit" type="submit">
             <SlidersHorizontal size={15} /> Aplicar
           </button>
-        </form>
+        </FacetedFilterForm>
       </section>
 
       <section className="data-panel table-panel">

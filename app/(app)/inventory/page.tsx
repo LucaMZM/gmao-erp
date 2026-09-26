@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { EmptyState } from "@/components/ui/empty-state";
+import { FacetedFilterForm } from "@/components/ui/faceted-filter-form";
 import { PageHeader } from "@/components/ui/page-header";
 import { Pagination } from "@/components/ui/pagination";
 import {
@@ -53,6 +54,31 @@ export default async function InventoryPage({
   const session = await requireDemoSession();
   const data = await listInventory(tenantScope(session), filters);
   const selectedStatus = data.selected ? stockTone(data.selected.part) : null;
+  const category = typeof filters.category === "string" ? filters.category : "";
+  const stock = typeof filters.stock === "string" ? filters.stock : "";
+  const critical = filters.critical === "1";
+  const categoryLabels = new Map(
+    data.facets.categories.map((item) => [item.value, item.label]),
+  );
+  const availableStock = new Set(data.facets.stock.map((item) => item.value));
+  const stockLabels: Record<string, string> = {
+    STOCKOUT: "Sin disponible",
+    REORDER: "Bajo reposición",
+    AVAILABLE: "Disponible",
+  };
+  const activeFilters = [
+    data.query ? { key: "q", label: `Búsqueda: ${data.query}` } : null,
+    category
+      ? {
+          key: "category",
+          label: `Categoría: ${categoryLabels.get(category) ?? category}`,
+        }
+      : null,
+    stock
+      ? { key: "stock", label: `Stock: ${stockLabels[stock] ?? stock}` }
+      : null,
+    critical ? { key: "critical", label: "Solo críticos" } : null,
+  ].filter((item): item is { key: string; label: string } => item !== null);
 
   return (
     <div className="page-stack inventory-page">
@@ -108,7 +134,10 @@ export default async function InventoryPage({
       </section>
 
       <section className="toolbar-panel">
-        <form className="filter-form inventory-filter-form" method="get">
+        <FacetedFilterForm
+          activeFilters={activeFilters}
+          className="inventory-filter-form"
+        >
           <label className="search-field">
             <Search size={16} />
             <input
@@ -119,33 +148,46 @@ export default async function InventoryPage({
           </label>
           <select
             aria-label="Filtrar por categoría"
-            defaultValue={
-              typeof filters.category === "string" ? filters.category : ""
-            }
+            defaultValue={category}
             name="category"
           >
             <option value="">Todas las categorías</option>
-            {data.categories.map((category) => (
-              <option key={category.code} value={category.code}>
-                {category.name}
+            {category && !categoryLabels.has(category) ? (
+              <option disabled value={category}>
+                {category} · sin coincidencias
+              </option>
+            ) : null}
+            {data.facets.categories.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
               </option>
             ))}
           </select>
           <select
             aria-label="Filtrar por estado de stock"
-            defaultValue={
-              typeof filters.stock === "string" ? filters.stock : ""
-            }
+            defaultValue={stock}
             name="stock"
           >
             <option value="">Cualquier stock</option>
-            <option value="STOCKOUT">Sin disponible</option>
-            <option value="REORDER">Bajo reposición</option>
-            <option value="AVAILABLE">Disponible</option>
+            {stock && !availableStock.has(stock) ? (
+              <option disabled value={stock}>
+                {stockLabels[stock] ?? stock} · sin coincidencias
+              </option>
+            ) : null}
+            {availableStock.has("STOCKOUT") ? (
+              <option value="STOCKOUT">Sin disponible</option>
+            ) : null}
+            {availableStock.has("REORDER") ? (
+              <option value="REORDER">Bajo reposición</option>
+            ) : null}
+            {availableStock.has("AVAILABLE") ? (
+              <option value="AVAILABLE">Disponible</option>
+            ) : null}
           </select>
           <label className="checkbox-filter">
             <input
-              defaultChecked={filters.critical === "1"}
+              defaultChecked={critical}
+              disabled={!critical && data.facets.criticalCount === 0}
               name="critical"
               type="checkbox"
               value="1"
@@ -155,7 +197,7 @@ export default async function InventoryPage({
           <button className="filter-submit" type="submit">
             <SlidersHorizontal size={15} /> Aplicar
           </button>
-        </form>
+        </FacetedFilterForm>
       </section>
 
       <section className="data-panel table-panel">

@@ -1,4 +1,4 @@
-import type { SqlValue, TenantScope } from "./shared";
+import type { FacetOption, SqlValue, TenantScope } from "./shared";
 import {
   normalizePage,
   normalizeQuery,
@@ -105,6 +105,11 @@ export type InventoryListData = {
   totalPages: number;
   query: string;
   categories: Array<{ code: string; name: string }>;
+  facets: {
+    categories: Array<FacetOption & { label: string }>;
+    stock: FacetOption[];
+    criticalCount: number;
+  };
   summary: {
     belowReorder: number;
     criticalStockouts: number;
@@ -122,15 +127,116 @@ export type InventoryListData = {
   };
 };
 
+type NormalizedInventoryFilters = {
+  query: string;
+  category: string;
+  stock: string;
+  critical: string;
+};
+
+type InventoryFacet = "category" | "stock" | "critical";
+
+function inventoryConditions(
+  scope: TenantScope,
+  filters: NormalizedInventoryFilters,
+  exclude?: InventoryFacet,
+): { conditions: string[]; params: SqlValue[] } {
+  const conditions = ["stock.site_id = ?", "part.status = ?"];
+  const params: SqlValue[] = [scope.siteId, "ACTIVE"];
+  if (filters.query) {
+    const like = `%${filters.query}%`;
+    conditions.push(
+      "(part.sku LIKE ? OR part.name LIKE ? OR part.manufacturer LIKE ? OR part.manufacturer_ref LIKE ?)",
+    );
+    params.push(like, like, like, like);
+  }
+  if (exclude !== "category" && filters.category) {
+    conditions.push("category.code = ?");
+    params.push(filters.category);
+  }
+  if (exclude !== "critical" && filters.critical === "1")
+    conditions.push("policy.critical = 1");
+  if (exclude !== "stock") {
+    if (filters.stock === "STOCKOUT")
+      conditions.push("(stock.on_hand - stock.reserved) <= 0");
+    if (filters.stock === "REORDER")
+      conditions.push(
+        "(stock.on_hand - stock.reserved) <= policy.reorder_point",
+      );
+    if (filters.stock === "AVAILABLE")
+      conditions.push(
+        "(stock.on_hand - stock.reserved) > policy.reorder_point",
+      );
+  }
+  return { conditions, params };
+}
+
+async function getInventoryFacets(
+  scope: TenantScope,
+  filters: NormalizedInventoryFilters,
+  warehouseScope: { sql: string; params: SqlValue[] },
+): Promise<InventoryListData["facets"]> {
+  const cte = `WITH stock AS (
+    SELECT stock_level.part_id, stock_level.site_id,
+      SUM(stock_level.on_hand) AS on_hand,
+      SUM(stock_level.reserved) AS reserved,
+      SUM(stock_level.on_order) AS on_order
+    FROM stock_levels stock_level
+    INNER JOIN warehouse_bins scoped_bin ON scoped_bin.id = stock_level.bin_id
+    WHERE stock_level.site_id = ? AND ${warehouseScope.sql}
+    GROUP BY stock_level.part_id, stock_level.site_id
+  )`;
+  const from = `FROM parts part
+    INNER JOIN part_categories category ON category.id = part.category_id
+    INNER JOIN stock ON stock.part_id = part.id
+    INNER JOIN part_site_policies policy ON policy.part_id = part.id AND policy.site_id = stock.site_id`;
+  const category = inventoryConditions(scope, filters, "category");
+  const stock = inventoryConditions(scope, filters, "stock");
+  const critical = inventoryConditions(scope, filters, "critical");
+  const [categories, stockCounts, criticalCount] = await Promise.all([
+    queryAll<FacetOption & { label: string }>(
+      `${cte} SELECT category.code AS value, category.name AS label, COUNT(*) AS count
+       ${from} WHERE ${category.conditions.join(" AND ")}
+       GROUP BY category.code, category.name ORDER BY category.name`,
+      [scope.siteId, ...warehouseScope.params, ...category.params],
+    ),
+    queryFirst<{ stockout: number; reorder: number; available: number }>(
+      `${cte} SELECT
+        SUM(CASE WHEN stock.on_hand - stock.reserved <= 0 THEN 1 ELSE 0 END) AS stockout,
+        SUM(CASE WHEN stock.on_hand - stock.reserved <= policy.reorder_point THEN 1 ELSE 0 END) AS reorder,
+        SUM(CASE WHEN stock.on_hand - stock.reserved > policy.reorder_point THEN 1 ELSE 0 END) AS available
+       ${from} WHERE ${stock.conditions.join(" AND ")}`,
+      [scope.siteId, ...warehouseScope.params, ...stock.params],
+    ),
+    queryFirst<{ count: number }>(
+      `${cte} SELECT COUNT(*) AS count ${from}
+       WHERE ${critical.conditions.join(" AND ")} AND policy.critical = 1`,
+      [scope.siteId, ...warehouseScope.params, ...critical.params],
+    ),
+  ]);
+  const stockOptions = [
+    { value: "STOCKOUT", count: Number(stockCounts?.stockout ?? 0) },
+    { value: "REORDER", count: Number(stockCounts?.reorder ?? 0) },
+    { value: "AVAILABLE", count: Number(stockCounts?.available ?? 0) },
+  ].filter((item) => item.count > 0);
+  return {
+    categories,
+    stock: stockOptions,
+    criticalCount: Number(criticalCount?.count ?? 0),
+  };
+}
+
 export async function listInventory(
   scope: TenantScope,
   filters: InventoryFilters,
 ): Promise<InventoryListData> {
   const page = normalizePage(filters.page);
-  const query = normalizeQuery(filters.q);
-  const category = normalizeQuery(filters.category, 30);
-  const stockState = normalizeQuery(filters.stock, 30);
-  const critical = normalizeQuery(filters.critical, 10);
+  const normalized: NormalizedInventoryFilters = {
+    query: normalizeQuery(filters.q),
+    category: normalizeQuery(filters.category, 30),
+    stock: normalizeQuery(filters.stock, 30),
+    critical: normalizeQuery(filters.critical, 10),
+  };
   const selectedId = normalizeQuery(filters.part, 80);
   const warehouseScope = warehouseScopePredicate(
     scope,
@@ -153,30 +259,10 @@ export async function listInventory(
     scope,
     "asset.functional_location_id",
   );
-  const conditions = ["stock.site_id = ?", "part.status = ?"];
-  const params: SqlValue[] = [scope.siteId, "ACTIVE"];
+  const filtered = inventoryConditions(scope, normalized);
+  const where = filtered.conditions.join(" AND ");
 
-  if (query) {
-    const like = `%${query}%`;
-    conditions.push(
-      "(part.sku LIKE ? OR part.name LIKE ? OR part.manufacturer LIKE ? OR part.manufacturer_ref LIKE ?)",
-    );
-    params.push(like, like, like, like);
-  }
-  if (category) {
-    conditions.push("category.code = ?");
-    params.push(category);
-  }
-  if (critical === "1") conditions.push("policy.critical = 1");
-  if (stockState === "STOCKOUT")
-    conditions.push("(stock.on_hand - stock.reserved) <= 0");
-  if (stockState === "REORDER")
-    conditions.push("(stock.on_hand - stock.reserved) <= policy.reorder_point");
-  if (stockState === "AVAILABLE")
-    conditions.push("(stock.on_hand - stock.reserved) > policy.reorder_point");
-  const where = conditions.join(" AND ");
-
-  const [countRow, items, categories, summary] = await Promise.all([
+  const [countRow, items, facets, summary] = await Promise.all([
     queryFirst<{ count: number }>(
       `
       WITH stock AS (
@@ -197,7 +283,7 @@ export async function listInventory(
       INNER JOIN part_site_policies policy ON policy.part_id = part.id AND policy.site_id = stock.site_id
       WHERE ${where}
     `,
-      [scope.siteId, ...warehouseScope.params, ...params],
+      [scope.siteId, ...warehouseScope.params, ...filtered.params],
     ),
     queryAll<InventoryListItem>(
       `
@@ -252,19 +338,12 @@ export async function listInventory(
       [
         scope.siteId,
         ...warehouseScope.params,
-        ...params,
+        ...filtered.params,
         PAGE_SIZE,
         (page - 1) * PAGE_SIZE,
       ],
     ),
-    queryAll<{ code: string; name: string }>(
-      `
-      SELECT code, name FROM part_categories
-      WHERE organization_id = ?
-      ORDER BY name
-    `,
-      [scope.organizationId],
-    ),
+    getInventoryFacets(scope, normalized, warehouseScope),
     queryFirst<{
       belowReorder: number;
       criticalStockouts: number;
@@ -461,8 +540,12 @@ export async function listInventory(
     page,
     pageSize: PAGE_SIZE,
     totalPages: Math.max(1, Math.ceil(total / PAGE_SIZE)),
-    query,
-    categories,
+    query: normalized.query,
+    categories: facets.categories.map(({ value, label }) => ({
+      code: value,
+      name: label,
+    })),
+    facets,
     summary: {
       belowReorder: Number(summary?.belowReorder ?? 0),
       criticalStockouts: Number(summary?.criticalStockouts ?? 0),

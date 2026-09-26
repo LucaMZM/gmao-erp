@@ -91,14 +91,14 @@ export type PlannerData = {
   personalAgenda: PlannerWorkOrder[];
 };
 
-function normalizeWeekStart(input?: string): string {
+function normalizeWeekStart(
+  input?: string,
+  asOf = new Date().toISOString(),
+): string {
   const base =
-    input && /^\d{4}-\d{2}-\d{2}$/.test(input)
-      ? input
-      : new Date().toISOString().slice(0, 10);
+    input && /^\d{4}-\d{2}-\d{2}$/.test(input) ? input : asOf.slice(0, 10);
   const date = new Date(`${base}T12:00:00.000Z`);
-  if (!Number.isFinite(date.getTime()))
-    return new Date().toISOString().slice(0, 10);
+  if (!Number.isFinite(date.getTime())) return asOf.slice(0, 10);
   const day = date.getUTCDay() || 7;
   date.setUTCDate(date.getUTCDate() - day + 1);
   return date.toISOString().slice(0, 10);
@@ -175,13 +175,14 @@ export async function getPlannerData(
   scope: TenantScope,
   currentUserId: string,
   requestedWeek?: string,
+  asOf = new Date().toISOString(),
 ): Promise<PlannerData> {
   const { queryAll } = scopedQueries(scope);
-  const weekStart = normalizeWeekStart(requestedWeek);
+  const weekStart = normalizeWeekStart(requestedWeek, asOf);
   const weekEnd = addDays(weekStart, 7);
   const weekStartIso = `${weekStart}T00:00:00.000Z`;
   const weekEndIso = `${weekEnd}T00:00:00.000Z`;
-  const now = new Date().toISOString();
+  const now = asOf;
   const today = now.slice(0, 10);
   const days: PlannerDay[] = Array.from({ length: 7 }, (_, index) => {
     const date = addDays(weekStart, index);

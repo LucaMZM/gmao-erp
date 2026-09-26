@@ -202,11 +202,13 @@ export type AuditFilters = {
   to?: string;
 };
 
-export async function getAuditEntries(
+type AuditFacet = "entity" | "outcome";
+
+function auditClauses(
   session: DemoUserSession,
   filters: AuditFilters,
-) {
-  const auditQuery = scopedQueries(tenantScope(session)).queryAll;
+  exclude?: AuditFacet,
+): { clauses: string[]; params: Array<string | number | null> } {
   const clauses = ["audit.organization_id = ?", "audit.site_id = ?"];
   const params: Array<string | number | null> = [
     session.organizationId,
@@ -220,11 +222,11 @@ export async function getAuditEntries(
     clauses.push("audit.action LIKE ?");
     params.push(`%${filters.action}%`);
   }
-  if (filters.entity) {
+  if (exclude !== "entity" && filters.entity) {
     clauses.push("audit.entity_type = ?");
     params.push(filters.entity);
   }
-  if (filters.outcome) {
+  if (exclude !== "outcome" && filters.outcome) {
     clauses.push("audit.outcome = ?");
     params.push(filters.outcome);
   }
@@ -236,6 +238,41 @@ export async function getAuditEntries(
     clauses.push("audit.created_at <= ?");
     params.push(`${filters.to}T23:59:59.999Z`);
   }
+  return { clauses, params };
+}
+
+export async function getAuditFacets(
+  session: DemoUserSession,
+  filters: AuditFilters,
+) {
+  const auditQuery = scopedQueries(tenantScope(session)).queryAll;
+  const entity = auditClauses(session, filters, "entity");
+  const outcome = auditClauses(session, filters, "outcome");
+  const [entities, outcomes] = await Promise.all([
+    auditQuery<{ value: string; count: number }>(
+      `SELECT audit.entity_type AS value, COUNT(*) AS count
+       FROM scope_audit_entries audit
+       WHERE ${entity.clauses.join(" AND ")}
+       GROUP BY audit.entity_type`,
+      entity.params,
+    ),
+    auditQuery<{ value: string; count: number }>(
+      `SELECT audit.outcome AS value, COUNT(*) AS count
+       FROM scope_audit_entries audit
+       WHERE ${outcome.clauses.join(" AND ")}
+       GROUP BY audit.outcome`,
+      outcome.params,
+    ),
+  ]);
+  return { entities, outcomes };
+}
+
+export async function getAuditEntries(
+  session: DemoUserSession,
+  filters: AuditFilters,
+) {
+  const auditQuery = scopedQueries(tenantScope(session)).queryAll;
+  const { clauses, params } = auditClauses(session, filters);
   return auditQuery<{
     id: string;
     actorName: string;

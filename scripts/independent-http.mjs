@@ -11,26 +11,32 @@ import { setTimeout as delay } from "node:timers/promises";
 
 const state = mkdtempSync(join(tmpdir(), "mazmi-http-audit-"));
 const base = "http://127.0.0.1:3041";
-const worker = spawn(
-  process.execPath,
-  [
-    "node_modules/wrangler/bin/wrangler.js",
-    "dev",
-    "--config",
-    "dist/server/wrangler.json",
-    "--ip",
-    "127.0.0.1",
-    "--port",
-    "3041",
-    "--inspector-port",
-    "9241",
-    "--local",
-    "--persist-to",
-    state,
-    "--show-interactive-dev-session=false",
-  ],
-  { stdio: ["ignore", "pipe", "pipe"] },
-);
+const visualMode = process.argv.includes("--visual-only");
+const visualTestNow = "2026-09-08T12:00:00.000Z";
+const workerArguments = [
+  "node_modules/wrangler/bin/wrangler.js",
+  "dev",
+  "--config",
+  "dist/server/wrangler.json",
+  "--ip",
+  "127.0.0.1",
+  "--port",
+  "3041",
+  "--inspector-port",
+  "9241",
+  "--local",
+  "--persist-to",
+  state,
+  "--show-interactive-dev-session=false",
+];
+if (visualMode)
+  workerArguments.push("--var", `MAZMI_TEST_NOW:${visualTestNow}`);
+const worker = spawn(process.execPath, workerArguments, {
+  env: visualMode
+    ? { ...process.env, MAZMI_TEST_NOW: visualTestNow }
+    : process.env,
+  stdio: ["ignore", "pipe", "pipe"],
+});
 let logs = "";
 worker.stdout.on("data", (chunk) => {
   logs += chunk;
@@ -110,7 +116,7 @@ try {
     process.argv.includes("--smoke-only") ||
     process.argv.includes("--visual-only")
   ) {
-    const visual = process.argv.includes("--visual-only");
+    const visual = visualMode;
     const smoke = spawn(
       process.execPath,
       visual

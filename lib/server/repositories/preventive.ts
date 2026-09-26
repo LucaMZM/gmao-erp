@@ -1,6 +1,6 @@
 import { scopedQueries } from "./scoped-queries";
 import { calculatePmCompliance } from "@/lib/domain/preventive";
-import type { SqlValue, TenantScope } from "./shared";
+import type { FacetOption, SqlValue, TenantScope } from "./shared";
 import { normalizeQuery } from "./shared";
 
 export type MaintenancePlanListItem = {
@@ -69,6 +69,7 @@ export type MaintenancePlanListData = {
   catalog: PreventiveCatalog;
   query: string;
   status: string;
+  statusFacets: FacetOption[];
 };
 
 export async function getPreventiveCatalog(
@@ -164,7 +165,17 @@ export async function listMaintenancePlans(
     params.push(like, like, like, like);
   }
 
-  const [items, counts, occurrences, catalog] = await Promise.all([
+  const facetConditions = ["plan.organization_id = ?", "plan.site_id = ?"];
+  const facetParams: SqlValue[] = [scope.organizationId, scope.siteId];
+  if (query) {
+    const like = `%${query}%`;
+    facetConditions.push(
+      "(plan.code LIKE ? OR plan.title LIKE ? OR asset.code LIKE ? OR asset.name LIKE ?)",
+    );
+    facetParams.push(like, like, like, like);
+  }
+
+  const [items, counts, occurrences, catalog, facetCounts] = await Promise.all([
     queryAll<MaintenancePlanListItem>(
       `SELECT plan.id, plan.code, plan.title, plan.description, plan.status,
         plan.trigger_mode AS triggerMode, plan.calendar_unit AS calendarUnit,
@@ -214,6 +225,25 @@ export async function listMaintenancePlans(
       [scope.organizationId, scope.siteId],
     ),
     getPreventiveCatalog(scope),
+    queryFirst<{
+      allCount: number;
+      due: number;
+      upcoming: number;
+      active: number;
+      inactive: number;
+    }>(
+      `SELECT COUNT(*) AS allCount,
+        SUM(CASE WHEN plan.status = 'ACTIVE' AND (plan.next_due_at <= ? OR
+          (meter.last_value IS NOT NULL AND plan.meter_threshold IS NOT NULL AND meter.last_value >= plan.meter_threshold)) THEN 1 ELSE 0 END) AS due,
+        SUM(CASE WHEN plan.status = 'ACTIVE' AND plan.next_due_at > ? AND plan.next_due_at <= ? THEN 1 ELSE 0 END) AS upcoming,
+        SUM(CASE WHEN plan.status = 'ACTIVE' THEN 1 ELSE 0 END) AS active,
+        SUM(CASE WHEN plan.status = 'INACTIVE' THEN 1 ELSE 0 END) AS inactive
+       FROM scope_maintenance_plans plan
+       INNER JOIN scope_assets asset ON asset.id = plan.asset_id
+       LEFT JOIN scope_meters meter ON meter.id = plan.meter_id
+       WHERE ${facetConditions.join(" AND ")}`,
+      [now, now, upcoming, ...facetParams],
+    ),
   ]);
   return {
     items,
@@ -227,6 +257,13 @@ export async function listMaintenancePlans(
     catalog,
     query,
     status,
+    statusFacets: [
+      { value: "all", count: Number(facetCounts?.allCount ?? 0) },
+      { value: "due", count: Number(facetCounts?.due ?? 0) },
+      { value: "upcoming", count: Number(facetCounts?.upcoming ?? 0) },
+      { value: "active", count: Number(facetCounts?.active ?? 0) },
+      { value: "inactive", count: Number(facetCounts?.inactive ?? 0) },
+    ].filter((item) => item.value === "all" || item.count > 0),
   };
 }
 
