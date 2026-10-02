@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
+import { GeistMono } from "geist/font/mono";
+import { GeistSans } from "geist/font/sans";
 import "./globals.css";
+import "./industrial-precision.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL(
@@ -34,12 +37,16 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="es" suppressHydrationWarning>
+    <html
+      className={`${GeistSans.variable} ${GeistMono.variable}`}
+      lang="es"
+      suppressHydrationWarning
+    >
       <head>
         <script
           dangerouslySetInnerHTML={{
             __html:
-              "try{var t=localStorage.getItem('mazmi-theme');document.documentElement.dataset.theme=t||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}",
+              "try{document.documentElement.dataset.theme=localStorage.getItem('mazmi-theme')==='dark'?'dark':'light'}catch(e){document.documentElement.dataset.theme='light'}",
           }}
         />
       </head>

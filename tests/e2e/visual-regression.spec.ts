@@ -83,7 +83,7 @@ test("technician work surface is visually stable", async ({
   });
 });
 
-test("light theme and keyboard focus are stable", async ({
+test("light default, dark toggle and keyboard focus are stable", async ({
   page,
 }, testInfo) => {
   await login(page, "responsable@mazmi.demo");
@@ -91,10 +91,15 @@ test("light theme and keyboard focus are stable", async ({
   await page.waitForTimeout(750);
   await themeToggle.focus();
   await expect(themeToggle).toBeFocused();
-  await themeToggle.click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await expect(page).toHaveScreenshot(
     `overview-light-${testInfo.project.name}.png`,
+    { fullPage: true },
+  );
+  await themeToggle.click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page).toHaveScreenshot(
+    `overview-dark-${testInfo.project.name}.png`,
     { fullPage: true },
   );
 });

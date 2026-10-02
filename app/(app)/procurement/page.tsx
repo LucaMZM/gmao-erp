@@ -321,8 +321,13 @@ export default async function ProcurementPage() {
         data={data}
       />
       <p className="procurement-freshness">
-        <Boxes size={13} /> Proyecciones derivadas de ubicaciones y movimientos
-        · {formatDateTime(data.generatedAt)}
+        <Boxes size={13} />
+        <span>
+          Proyecciones derivadas de ubicaciones y movimientos ·{" "}
+          <time dateTime={data.generatedAt}>
+            {formatDateTime(data.generatedAt)}
+          </time>
+        </span>
       </p>
     </div>
   );

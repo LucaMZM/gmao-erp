@@ -1,21 +1,19 @@
-# Industrial Liquid
+# Industrial Precision
 
-Industrial Liquid combina superficies de datos sólidas con navegación flotante selectivamente translúcida. La interfaz prioriza contexto industrial, estado operativo y siguiente acción útil.
+Industrial Precision es la capa visual de Mazmi Factory GMAO. Conserva las estructuras y flujos industriales existentes; refuerza lectura, jerarquía y consistencia sin convertir las superficies de trabajo en decoración.
 
-## Tokens
+## Fundamentos
 
-- Canvas claro `#F2F4F2`; superficies `#FFFFFF`; tinta `#17201D`.
-- Canvas oscuro `#0D1311`; superficies `#131B18`; tinta `#ECF2EF`.
-- Acento verde técnico; ámbar óxido para atención; rojo mineral para criticidad; azul acero para información.
-- Espaciado en múltiplos de 4; filas 48–52 px; radios 10/14/18 px.
-- Números tabulares para métricas, cantidades y costes. Monoespaciada solo para códigos.
+- Tema claro por defecto: canvas `#F6F7F8`, superficie `#FFFFFF`, tinta `#15171A`.
+- Tema oscuro grafito: canvas `#111315`, superficie `#171A1D`, tinta `#F2F4F5`.
+- Azul cobalto (`#2457D6` en claro; `#85A0F4` en oscuro) para navegación activa, foco y acción primaria. Verde, ámbar y rojo quedan reservados para estados semánticos.
+- Geist Sans para interfaz y Geist Mono para identificadores técnicos. Los números operativos siguen siendo tabulares.
+- Radios de 4/6/9/12 px y bordes neutros. Elevación marcada solo en menús, diálogos y drawers.
 
-Glass se limita a sidebar, topbar flotante, command palette, popovers y drawers. Tablas, formularios y KPIs permanecen sólidos y legibles.
+Los tokens están en `app/industrial-precision.css`, importado después de la hoja heredada. Las superficies de datos son sólidas; el shell tiene sidebar y topbar compactos, sin blur decorativo. Tablas y filtros conservan densidad con una escala tipográfica más legible. Los KPIs muestran prioridad por jerarquía, no por saturación de color.
 
-El Planner mantiene esta regla: la malla de técnicos y días es una superficie sólida y densa; solo los controles de semana, filtros y feedback contextual flotan. Capacidad, prioridad, origen preventivo y conflictos se diferencian por jerarquía y semántica, no mediante decoración. En móvil la malla se sustituye por una agenda personal de hoy y próximos trabajos.
+El Planner mantiene una malla sólida de técnicos y días. En móvil se priorizan agenda, ejecución y tarjetas de dominio; no se comprimen tablas de escritorio. Reliability Center conserva señales explicables, ranking y Pareto. Procurement y Reporting comparten la misma gramática de controles y datos.
 
-Reliability Center usa una cubierta operativa jerárquica, señales accionables, ranking y Pareto. El color comunica deterioro, recurrencia y estado; las métricas sin evidencia muestran “Datos insuficientes”. RCA conserva el contexto causal en una única workspace densa y lleva las decisiones a acciones reales.
+## Estados e interacción
 
-## Movimiento y accesibilidad
-
-Hovers 120 ms, cambios 160 ms y drawers 220 ms con curva contenida. `prefers-reduced-motion` elimina desplazamiento y shimmer. Todas las acciones tienen foco visible, labels, contraste AA, landmarks y navegación por teclado. En móvil, las tablas se transforman en tarjetas de dominio y la navegación pasa a barra inferior.
+Los controles comparten foco visible de 2 px, hover contenido y estados disabled legibles. La app respeta `prefers-reduced-motion`; no se añaden animaciones ornamentales. Los estados críticos usan texto e iconografía además de color. El selector de tema persiste la elección del usuario y, sin preferencia guardada, inicia en claro.
