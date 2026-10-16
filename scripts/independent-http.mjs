@@ -71,6 +71,29 @@ async function post(path, cookie, body, headers = {}) {
     body: JSON.stringify(body),
   });
 }
+async function retryProxyTransport(label, request) {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const response = await request();
+      if (
+        response.status !== 500 ||
+        (await response.clone().text()).trim() !==
+          "Error: Network connection lost."
+      )
+        return response;
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        error.message !== "Network connection lost."
+      )
+        throw error;
+    }
+    // Retry only Wrangler's ProxyWorker transport error, never an API 500.
+    console.log(`WRANGLER_PROXY_RETRY ${label} ${attempt + 1}`);
+    await delay(200);
+  }
+  throw new Error(`Wrangler proxy did not recover: ${label}`);
+}
 async function login(email) {
   const response = await post("/api/auth/login", "", {
     email,
@@ -254,22 +277,12 @@ try {
       ["other organization", { "x-mazmi-organization": "other-org" }],
     ])
       await check(`offline replay rejects ${label}`, async () => {
-        let result;
-        for (let attempt = 0; attempt < 6; attempt++) {
-          result = await post("/api/field/handovers", tech, handover, {
+        const result = await retryProxyTransport(label, () =>
+          post("/api/field/handovers", tech, handover, {
             ...headers,
             ...changed,
-          });
-          if (
-            result.status !== 500 ||
-            (await result.clone().text()).trim() !==
-              "Error: Network connection lost."
-          )
-            break;
-          // Retry only Wrangler's transport failure, never an API 500.
-          console.log(`WRANGLER_PROXY_RETRY ${label} ${attempt + 1}`);
-          await delay(200);
-        }
+          }),
+        );
         const body = await result.text();
         assert.equal(result.status, 403, body.slice(0, 500));
         assert.equal(JSON.parse(body).error.code, "OFFLINE_SCOPE_CHANGED");
@@ -909,7 +922,19 @@ try {
       "expired idle and absolute sessions are rejected by the compiled API",
       async () => {
         for (const column of ["idle_expires_at", "absolute_expires_at"]) {
-          const expiredCookie = await login("planner@mazmi.demo");
+          const loginResponse = await retryProxyTransport(
+            `expired session login ${column}`,
+            () =>
+              post("/api/auth/login", "", {
+                email: "planner@mazmi.demo",
+                password: "Mazmi2026!",
+              }),
+          );
+          assert.equal(loginResponse.status, 200, column);
+          const expiredCookie = loginResponse.headers
+            .get("set-cookie")
+            ?.split(";")[0];
+          assert(expiredCookie);
           const tokenHash = createHash("sha256")
             .update(expiredCookie.slice(expiredCookie.indexOf("=") + 1))
             .digest("hex");
@@ -919,15 +944,24 @@ try {
           );
           assert.equal(
             (
-              await fetch(base + "/api/search?q=LM-02", {
-                headers: { cookie: expiredCookie },
-              })
+              await retryProxyTransport(
+                `expired session search ${column}`,
+                () =>
+                  fetch(base + "/api/search?q=LM-02", {
+                    headers: { cookie: expiredCookie },
+                  }),
+              )
             ).status,
             401,
             column,
           );
           assert.equal(
-            (await post("/api/incidents", expiredCookie, {})).status,
+            (
+              await retryProxyTransport(
+                `expired session mutation ${column}`,
+                () => post("/api/incidents", expiredCookie, {}),
+              )
+            ).status,
             401,
             column,
           );
