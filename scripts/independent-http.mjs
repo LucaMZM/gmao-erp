@@ -254,12 +254,25 @@ try {
       ["other organization", { "x-mazmi-organization": "other-org" }],
     ])
       await check(`offline replay rejects ${label}`, async () => {
-        const result = await post("/api/field/handovers", tech, handover, {
-          ...headers,
-          ...changed,
-        });
-        assert.equal(result.status, 403);
-        assert.equal((await result.json()).error.code, "OFFLINE_SCOPE_CHANGED");
+        let result;
+        for (let attempt = 0; attempt < 6; attempt++) {
+          result = await post("/api/field/handovers", tech, handover, {
+            ...headers,
+            ...changed,
+          });
+          if (
+            result.status !== 500 ||
+            (await result.clone().text()).trim() !==
+              "Error: Network connection lost."
+          )
+            break;
+          // Retry only Wrangler's transport failure, never an API 500.
+          console.log(`WRANGLER_PROXY_RETRY ${label} ${attempt + 1}`);
+          await delay(200);
+        }
+        const body = await result.text();
+        assert.equal(result.status, 403, body.slice(0, 500));
+        assert.equal(JSON.parse(body).error.code, "OFFLINE_SCOPE_CHANGED");
         assert.equal(
           db
             .prepare(
