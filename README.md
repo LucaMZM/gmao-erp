@@ -1,5 +1,7 @@
 # GMAO / ERP
 
+[![CI](https://github.com/LucaMZM/gmao-erp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LucaMZM/gmao-erp/actions/workflows/ci.yml)
+
 Industrial Maintenance & Operations Platform
 
 An industrial maintenance platform built around the way a plant actually works: assets in context, traceable interventions, stock movements, preventive planning and explainable reliability signals. The included company and all operational records are fictional demo data.
