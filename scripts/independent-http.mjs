@@ -77,8 +77,9 @@ async function retryProxyTransport(label, request) {
       const response = await request();
       if (
         response.status !== 500 ||
-        (await response.clone().text()).trim() !==
-          "Error: Network connection lost."
+        !(await response.clone().text())
+          .trim()
+          .startsWith("Error: Network connection lost.")
       )
         return response;
     } catch (error) {
@@ -296,32 +297,22 @@ try {
         );
       });
     await check("same idempotency key cannot change payload", async () => {
-      let changed;
       // Wrangler's local ProxyWorker can lose its dev-server connection while
-      // the Worker remains healthy. Retry only this exact transport response;
+      // the Worker remains healthy. Retry only this transport response;
       // the same idempotency key/payload must still be rejected by the API.
-      let proxyRetries = 0;
-      for (let attempt = 0; attempt < 6; attempt++) {
-        changed = await post(
+      const changed = await retryProxyTransport("changed payload", () =>
+        post(
           "/api/field/handovers",
           tech,
           { ...handover, summary: "Altered payload" },
           headers,
-        );
-        if (
-          changed.status !== 500 ||
-          (await changed.clone().text()).trim() !==
-            "Error: Network connection lost."
-        )
-          break;
-        proxyRetries++;
-        await delay(200);
-      }
+        ),
+      );
       const body = await changed.text();
       assert.equal(
         changed.status,
         409,
-        `${changed.status} ${body.slice(0, 300)} after ${proxyRetries} ProxyWorker retries`,
+        `${changed.status} ${body.slice(0, 300)}`,
       );
     });
     const evidencePath = `/api/field/work-orders/${number}/evidence`;
