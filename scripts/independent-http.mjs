@@ -10,8 +10,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 
 const state = mkdtempSync(join(tmpdir(), "mazmi-http-audit-"));
-const auditPort = Number(process.env.MAZMI_HTTP_PORT ?? 3041);
-const base = `http://127.0.0.1:${auditPort}`;
+const base = "http://127.0.0.1:3041";
 const visualMode = process.argv.includes("--visual-only");
 const visualTestNow = "2026-09-08T12:00:00.000Z";
 const workerArguments = [
@@ -22,9 +21,9 @@ const workerArguments = [
   "--ip",
   "127.0.0.1",
   "--port",
-  String(auditPort),
+  "3041",
   "--inspector-port",
-  String(auditPort + 6200),
+  "9241",
   "--local",
   "--persist-to",
   state,
@@ -162,19 +161,6 @@ try {
       smoke.once("error", reject);
       smoke.once("exit", resolve);
     });
-    if (code !== 0) {
-      const plainLogs = logs.replace(/\x1b\[[0-9;]*m/g, "");
-      const proxyErrors = plainLogs
-        .split("\n")
-        .filter(
-          (line) =>
-            line.includes("Error inside ProxyWorker") &&
-            line.includes("Network connection lost"),
-        );
-      if (proxyErrors.length)
-        console.error(`WRANGLER_PROXY_TRANSPORT ${proxyErrors.at(-1)}`);
-      else console.error(`WRANGLER_FAILURE ${plainLogs.slice(-2_000)}`);
-    }
     assert.equal(
       code,
       0,

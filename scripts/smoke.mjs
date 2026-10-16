@@ -24,12 +24,6 @@ async function assertRenderedPage(response, path) {
 }
 
 async function expectApiError(response, status, code) {
-  if (response.status !== status) {
-    const unexpectedBody = await response.clone().text();
-    throw new Error(
-      `Expected ${status}, got ${response.status}: ${unexpectedBody.slice(0, 800)}`,
-    );
-  }
   assert(
     response.status === status,
     `Expected ${status}, got ${response.status}`,
