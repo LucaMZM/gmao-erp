@@ -161,6 +161,7 @@ try {
       smoke.once("error", reject);
       smoke.once("exit", resolve);
     });
+    if (code !== 0) console.error(`WRANGLER_LOGS ${logs.slice(-8_000)}`);
     assert.equal(
       code,
       0,
