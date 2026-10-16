@@ -26,6 +26,7 @@ import {
 } from "@/lib/presentation";
 import { requireDemoSession } from "@/lib/server/auth";
 import { listMaintenancePlans } from "@/lib/server/repositories/preventive";
+import { latestPreventiveSchedulerRun } from "@/lib/server/preventive-scheduler";
 
 function triggerDetail(item: {
   triggerMode: string;
@@ -55,6 +56,7 @@ export default async function MaintenancePlansPage({
   if (!hasPermission(session.permissionCodes, "preventive.manage"))
     redirect("/overview");
   const data = await listMaintenancePlans(tenantScope(session), filters);
+  const scheduler = await latestPreventiveSchedulerRun();
   const canCreate = can(session, "MAINTENANCE_PLAN_CREATE");
   const now = new Date().toISOString();
   const statusLabels: Record<string, string> = {
@@ -89,6 +91,12 @@ export default async function MaintenancePlansPage({
         eyebrow={`${session.siteCode} · Preventivo`}
         title="Planes de mantenimiento"
       />
+      <p className="text-xs text-muted-foreground" role="status">
+        Automatización preventiva:{" "}
+        {scheduler
+          ? `${scheduler.status === "COMPLETE" ? "correcta" : scheduler.status === "RUNNING" ? "en curso" : "requiere revisión"} · ${formatDateTime(scheduler.finishedAt ?? scheduler.startedAt)}`
+          : "sin ejecuciones registradas"}
+      </p>
 
       <section
         className="preventive-kpi-strip"

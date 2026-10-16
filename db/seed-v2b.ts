@@ -29,6 +29,20 @@ async function execute(db: D1Database, operations: Operation[]) {
 }
 
 const permissions = [
+  [
+    "identity.manage",
+    "identity",
+    "manage",
+    "Administrar usuarios y ámbitos",
+    1,
+  ],
+  [
+    "inventory.manage",
+    "inventory",
+    "manage",
+    "Administrar catálogo y almacenes MRO",
+    1,
+  ],
   ["incident.report", "incident", "report", "Comunicar una incidencia", 0],
   [
     "incident.triage",
@@ -82,7 +96,9 @@ const permissions = [
 
 const roleGrants: Record<string, string[]> = {
   ADMIN: permissions.map(([code]) => code),
-  MAINTENANCE_MANAGER: permissions.map(([code]) => code),
+  MAINTENANCE_MANAGER: permissions
+    .map(([code]) => code)
+    .filter((code) => code !== "identity.manage"),
   PLANNER: [
     "incident.report",
     "incident.triage",
@@ -123,6 +139,7 @@ const roleGrants: Record<string, string[]> = {
   ],
   OPERATOR: ["incident.report"],
   WAREHOUSE: [
+    "inventory.manage",
     "incident.report",
     "inventory.reserve",
     "inventory.consume",
@@ -131,6 +148,7 @@ const roleGrants: Record<string, string[]> = {
     "reports.read",
   ],
   PROCUREMENT: [
+    "inventory.manage",
     "procurement.request",
     "procurement.approve",
     "procurement.receive",
@@ -139,6 +157,71 @@ const roleGrants: Record<string, string[]> = {
   ],
   VIEWER: ["incident.report", "reports.read"],
 };
+
+/** Product authorization catalog, independent of any demo organization/user. */
+export async function seedCoreAuthorization(db: D1Database): Promise<void> {
+  const roles = [
+    ["ADMIN", "Administrador", "Gobierno de plataforma y seguridad", 1],
+    [
+      "MAINTENANCE_MANAGER",
+      "Responsable de Mantenimiento",
+      "Responsabilidad operativa y de equipo",
+      10,
+    ],
+    ["PLANNER", "Planner", "Planificación, backlog y programación", 20],
+    [
+      "RELIABILITY_ENGINEER",
+      "Ingeniero de Fiabilidad",
+      "Análisis de condición y fiabilidad",
+      30,
+    ],
+    [
+      "SUPERVISOR",
+      "Supervisor",
+      "Supervisión de trabajos por especialidad",
+      40,
+    ],
+    [
+      "TECHNICIAN",
+      "Técnico",
+      "Ejecución y documentación de intervenciones",
+      50,
+    ],
+    ["WAREHOUSE", "Almacén", "Operación de inventario MRO", 60],
+    ["PROCUREMENT", "Compras", "Sourcing, pedidos y control de suministro", 65],
+    ["OPERATOR", "Operario", "Comunicación rápida de incidencias", 70],
+    ["VIEWER", "Viewer", "Consulta operativa sin mutaciones", 90],
+  ] as const;
+  const now = new Date().toISOString();
+  const operations: Operation[] = roles.map(([key, name, description, rank]) =>
+    insert(
+      "roles",
+      ["key", "name", "description", "rank"],
+      [key, name, description, rank],
+    ),
+  );
+  for (const [code, domain, action, description, sensitive] of permissions) {
+    operations.push(
+      insert(
+        "permission_definitions",
+        ["code", "domain", "action", "description", "sensitive"],
+        [code, domain, action, description, sensitive],
+      ),
+    );
+  }
+  for (const [role, grants] of Object.entries(roleGrants)) {
+    for (const grant of new Set(grants)) {
+      operations.push(
+        insert(
+          "role_permissions",
+          ["role_key", "permission_code", "created_at"],
+          [role, grant, now],
+        ),
+      );
+    }
+  }
+  await execute(db, operations);
+}
 
 export async function seedV2BDatabase(db: D1Database): Promise<void> {
   const seeded = await db

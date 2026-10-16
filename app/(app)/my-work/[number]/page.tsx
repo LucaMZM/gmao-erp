@@ -15,6 +15,7 @@ import { formatDateTime, formatDuration, typeLabels } from "@/lib/presentation";
 import { requireDemoSession } from "@/lib/server/auth";
 import { getFieldWorkOrder } from "@/lib/server/repositories/field";
 import { tenantScope } from "@/lib/server/repositories/shared";
+import { getFailureModeOptions } from "@/lib/server/repositories/failure-modes";
 
 export default async function FieldWorkOrderPage({
   params,
@@ -33,6 +34,7 @@ export default async function FieldWorkOrderPage({
   );
   if (!data) notFound();
   const { order } = data;
+  const failureModes = await getFailureModeOptions(tenantScope(session));
 
   return (
     <div className="page-stack field-order-page">
@@ -108,7 +110,11 @@ export default async function FieldWorkOrderPage({
           ) : null}
         </div>
       </header>
-      <FieldWorkspace data={data} userId={session.userId} />
+      <FieldWorkspace
+        data={data}
+        userId={session.userId}
+        failureModes={failureModes}
+      />
     </div>
   );
 }

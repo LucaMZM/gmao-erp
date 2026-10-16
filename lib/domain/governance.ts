@@ -1,6 +1,8 @@
 import { DomainInvariantError } from "./errors";
 
 export const enterprisePermissions = [
+  "identity.manage",
+  "inventory.manage",
   "incident.report",
   "incident.triage",
   "workorder.create",

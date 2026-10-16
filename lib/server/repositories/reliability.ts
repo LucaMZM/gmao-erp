@@ -7,6 +7,7 @@ import {
   type TrendDirection,
 } from "@/lib/domain/reliability";
 import type { TenantScope } from "./shared";
+import { syncHealthProjection } from "../health-projection";
 
 const OPEN_STATES =
   "('REQUESTED','TRIAGE','APPROVED','PLANNED','SCHEDULED','ASSIGNED','IN_PROGRESS','PAUSED','WAITING_PART','WAITING_VENDOR')";
@@ -237,10 +238,18 @@ export type ReliabilityCenterData = {
   };
 };
 
-function assetMetricQuery(scope: TenantScope, now: string, assetId?: string) {
+function assetMetricQuery(
+  scope: TenantScope,
+  now: string,
+  assetId?: string | string[],
+) {
   const start90 = daysBefore(now, 90);
   const start30 = daysBefore(now, 30);
-  const assetFilter = assetId ? "AND asset.id = ?" : "";
+  const assetFilter = Array.isArray(assetId)
+    ? `AND asset.id IN (${assetId.map(() => "?").join(",") || "NULL"})`
+    : assetId
+      ? "AND asset.id = ?"
+      : "";
   const params: Array<string | number | null> = [
     now,
     start90,
@@ -257,7 +266,7 @@ function assetMetricQuery(scope: TenantScope, now: string, assetId?: string) {
     scope.organizationId,
     scope.siteId,
   ];
-  if (assetId) params.push(assetId);
+  if (assetId) params.push(...(Array.isArray(assetId) ? assetId : [assetId]));
   return {
     sql: `
     WITH metric_cutoff AS (SELECT ? AS ends_at), failure_groups AS (
@@ -361,13 +370,25 @@ function assetMetricQuery(scope: TenantScope, now: string, assetId?: string) {
 async function loadAssetRows(
   scope: TenantScope,
   now: string,
-  assetId?: string,
+  assetId?: string | string[],
 ): Promise<AssetMetricRow[]> {
   const query = assetMetricQuery(scope, now, assetId);
   return scopedQueries(scope).queryAll<AssetMetricRow>(
     `${query.sql}
-    SELECT * FROM metric_rows ORDER BY (downtimeMinutes*2+failures*120) DESC,criticality,code LIMIT 250`,
+    SELECT * FROM metric_rows ORDER BY (downtimeMinutes*2+failures*120) DESC,criticality,code LIMIT ${Array.isArray(assetId) ? Math.max(1, assetId.length) : 250}`,
     query.params,
+  );
+}
+
+/** Internal projection source; same metric query and scoring as asset detail. */
+export async function calculateCurrentAssetHealth(
+  scope: TenantScope,
+  assetIds: string[],
+  asOf: string,
+): Promise<Array<{ id: string; score: number }>> {
+  if (!assetIds.length) return [];
+  return makeBadActors(await loadAssetRows(scope, asOf, assetIds), asOf).map(
+    (asset) => ({ id: asset.id, score: asset.healthScore }),
   );
 }
 
@@ -781,6 +802,7 @@ export async function getReliabilityCenter(
   scope: TenantScope,
   asOf = new Date().toISOString(),
 ): Promise<ReliabilityCenterData> {
+  await syncHealthProjection(scope);
   const { queryAll } = scopedQueries(scope);
   const start90 = daysBefore(asOf, 90);
   const [

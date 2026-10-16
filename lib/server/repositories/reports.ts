@@ -1,10 +1,61 @@
 import { scopedQueries } from "./scoped-queries";
 import type { DemoUserSession } from "@/lib/server/auth";
 export { reportingCsv } from "@/lib/domain/reporting";
+import type { CostByAssetExportRow } from "@/lib/domain/reporting";
 import { getProductionExposure } from "./governance";
 import { tenantScope } from "./shared";
 
 export type ReportFilters = { from: string; to: string };
+
+export async function listExportAssetCosts(
+  session: DemoUserSession,
+  filters: ReportFilters,
+  afterId: string,
+  limit = 200,
+): Promise<Array<CostByAssetExportRow & { id: string }>> {
+  const { queryAll } = scopedQueries(tenantScope(session));
+  const from = `${filters.from}T00:00:00.000Z`;
+  const to = `${filters.to}T23:59:59.999Z`;
+  return queryAll<CostByAssetExportRow & { id: string }>(
+    `SELECT asset.id,asset.code,asset.name,
+      COALESCE((SELECT SUM(labor.labor_cost_cents) FROM labor_sessions labor
+        INNER JOIN scope_work_orders wo ON wo.id=labor.work_order_id
+        WHERE wo.asset_id=asset.id AND labor.started_at BETWEEN ? AND ?),0) AS laborCents,
+      COALESCE((SELECT ROUND(SUM(usage.total_cost)*100) FROM scope_work_order_part_usages usage
+        INNER JOIN scope_work_orders wo ON wo.id=usage.work_order_id
+        WHERE wo.asset_id=asset.id AND usage.created_at BETWEEN ? AND ?),0) AS materialCents,
+      COALESCE((SELECT SUM(cost.amount_cents) FROM scope_work_order_cost_items cost
+        INNER JOIN scope_work_orders wo ON wo.id=cost.work_order_id
+        WHERE wo.asset_id=asset.id AND cost.recorded_at BETWEEN ? AND ?),0) AS explicitCents,
+      COALESCE((SELECT SUM(down.duration_minutes) FROM scope_downtime_events down
+        WHERE down.asset_id=asset.id AND down.started_at BETWEEN ? AND ?),0) AS downtimeMinutes
+     FROM scope_assets asset
+     WHERE asset.organization_id=? AND asset.site_id=? AND asset.id>?
+     ORDER BY asset.id LIMIT ?`,
+    [
+      from,
+      to,
+      from,
+      to,
+      from,
+      to,
+      from,
+      to,
+      session.organizationId,
+      session.siteId,
+      afterId,
+      Math.max(1, Math.min(limit, 200)),
+    ],
+  ).then((rows) =>
+    rows.map((row) => ({
+      ...row,
+      totalCents:
+        Number(row.laborCents) +
+        Number(row.materialCents) +
+        Number(row.explicitCents),
+    })),
+  );
+}
 
 export async function getReportingData(
   session: DemoUserSession,

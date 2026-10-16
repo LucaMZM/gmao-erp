@@ -22,7 +22,10 @@ import {
   changePurchaseOrderStatus,
   receivePurchaseOrder,
 } from "@/lib/server/operations/procurement";
-import { getReportingData } from "@/lib/server/repositories/reports";
+import {
+  getReportingData,
+  listExportAssetCosts,
+} from "@/lib/server/repositories/reports";
 import { tenantScope } from "@/lib/server/repositories/shared";
 import {
   addPlannedMaterial,
@@ -64,7 +67,10 @@ import {
 import { getPlannerData } from "@/lib/server/repositories/planner";
 import { listInventory } from "@/lib/server/repositories/inventory";
 import { listAssets } from "@/lib/server/repositories/assets";
-import { listWorkOrders } from "@/lib/server/repositories/work-orders";
+import {
+  listWorkOrders,
+  getWorkOrderDetail,
+} from "@/lib/server/repositories/work-orders";
 import { listIncidents } from "@/lib/server/repositories/incidents";
 import { getMyWork } from "@/lib/server/repositories/field";
 import {
@@ -76,6 +82,14 @@ import {
   createEvidenceMetadata,
 } from "@/lib/server/operations/field";
 import { runIdempotent } from "@/lib/server/operations/shared";
+import { recordPhysicalCount } from "@/lib/server/operations/physical-count";
+import { recordWorkOrderCost } from "@/lib/server/operations/work-order-costs";
+import { addLaborRate } from "@/lib/server/operations/labor-rates";
+import {
+  reportIncident,
+  triageIncident,
+  convertIncidentToWorkOrder,
+} from "@/lib/server/operations/incidents";
 
 // Only the Cloudflare binding is injected. Queries, migrations, triggers,
 // transactions and domain operations run against actual local D1/workerd.
@@ -276,7 +290,7 @@ afterAll(async () => {
 });
 
 describe("independent audit — persisted boundaries", () => {
-  it("interrupted idempotency checkpoint fails closed and an explicitly recovered key commits only once", async () => {
+  it("interrupted idempotency checkpoint is reclaimed after its lease and commits only once", async () => {
     const number = await fixtureOrder("AUDIT-ORPHAN-IDEMPOTENCY");
     const identity = { number, description: "Original recoverable note" };
     const digest = await crypto.subtle.digest(
@@ -325,33 +339,19 @@ describe("independent audit — persisted boundaries", () => {
         identity,
       );
     };
-    for (let attempt = 0; attempt < 2; attempt++)
-      await expect(retry()).rejects.toMatchObject({
-        status: 409,
-        code: "OPERATION_SYNCING",
-      });
-    expect(executions).toBe(0);
-    expect(
-      (await db
-        .prepare(
-          "SELECT COUNT(*) AS n FROM evidence_items WHERE work_order_id=?",
-        )
-        .bind(number)
-        .first<{ n: number }>())!.n,
-    ).toBe(0);
-    // Operator recovery is deliberately manual and conditional, after proving
-    // the original request has ended and no business effect was committed.
-    const recovery = await db
-      .prepare(
-        "DELETE FROM operation_idempotency WHERE id=? AND response_json IS NULL",
-      )
-      .bind("audit-orphan-reservation")
-      .run();
-    expect(recovery.meta.changes).toBe(1);
     const result = await retry();
     expect(result.replayed).toBe(false);
     expect(await retry()).toEqual({ value: result.value, replayed: true });
     expect(executions).toBe(1);
+    expect(
+      (
+        await db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM audit_entries WHERE action='IDEMPOTENCY_RESERVATION_RECOVERED' AND entity_id='audit-orphan-reservation'",
+          )
+          .first<{ n: number }>()
+      )?.n,
+    ).toBe(1);
     expect(
       (await db
         .prepare(
@@ -400,6 +400,97 @@ describe("independent audit — persisted boundaries", () => {
         .bind(number)
         .first<{ n: number }>())!.n,
     ).toBe(1);
+  });
+
+  it("lease reclaim fences a delayed worker and rejects a changed payload", async () => {
+    const number = await fixtureOrder("AUDIT-LEASE-RACE");
+    const key = "audit_lease_race_key";
+    let releaseOld!: () => void;
+    let startedOld!: () => void;
+    const started = new Promise<void>((resolve) => {
+      startedOld = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    const write = (ctx: ReturnType<typeof context>, id: string) =>
+      createEvidenceMetadata(ctx, number, {
+        id,
+        kind: "NOTE",
+        stage: "GENERAL",
+        description: "Lease race evidence",
+      }).then(() => ({ id, ok: true }));
+    const oldContext = context();
+    const old = runIdempotent(
+      oldContext,
+      key,
+      "FIELD_EVIDENCE",
+      async () => {
+        startedOld();
+        await hold;
+        return write(oldContext, "audit-old-worker-evidence");
+      },
+      { number, description: "same" },
+    );
+    await started;
+    await expect(
+      runIdempotent(
+        context(),
+        key,
+        "FIELD_EVIDENCE",
+        async () => ({ id: "never" }),
+        { number, description: "same" },
+      ),
+    ).rejects.toMatchObject({ code: "OPERATION_SYNCING" });
+    await db
+      .prepare(
+        "UPDATE operation_idempotency SET created_at=? WHERE idempotency_key=?",
+      )
+      .bind("2026-01-01T00:00:00.000Z", key)
+      .run();
+    await expect(
+      runIdempotent(
+        context(),
+        key,
+        "FIELD_EVIDENCE",
+        async () => ({ id: "never" }),
+        { number, description: "changed" },
+      ),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+    const freshContext = context();
+    const fresh = await runIdempotent(
+      freshContext,
+      key,
+      "FIELD_EVIDENCE",
+      () => write(freshContext, "audit-fresh-worker-evidence"),
+      { number, description: "same" },
+    );
+    releaseOld();
+    await expect(old).rejects.toMatchObject({
+      code: "CONCURRENT_MODIFICATION",
+    });
+    expect(
+      (
+        await db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM evidence_items WHERE work_order_id=? AND id IN (?,?)",
+          )
+          .bind(
+            number,
+            "audit-old-worker-evidence",
+            "audit-fresh-worker-evidence",
+          )
+          .first<{ n: number }>()
+      )?.n,
+    ).toBe(1);
+    const replay = await runIdempotent(
+      context(),
+      key,
+      "FIELD_EVIDENCE",
+      async () => ({ id: "never" }),
+      { number, description: "same" },
+    );
+    expect(replay).toEqual({ value: fresh.value, replayed: true });
   });
 
   it("double PR conversion commits one PO and one set of lines", async () => {
@@ -545,6 +636,211 @@ describe("independent audit — persisted boundaries", () => {
     expect(
       (await generatePreventiveWorkOrder(context(), plan.code)).created,
     ).toBe(false);
+  });
+
+  it("corrective completion persists an organization-scoped formal failure mode for Reliability", async () => {
+    const number = await fixtureOrder("OT-LEV-2026-FORMAL", "IN_PROGRESS");
+    await db
+      .prepare(
+        "UPDATE work_orders SET type='CORRECTIVE',source='MANUAL',requested_at=? WHERE number=?",
+      )
+      .bind(new Date().toISOString(), number)
+      .run();
+    const mode = await db
+      .prepare(
+        "SELECT id,code FROM failure_modes WHERE organization_id=? AND status='ACTIVE' LIMIT 1",
+      )
+      .bind(manager.organizationId)
+      .first<{ id: string; code: string }>();
+    expect(mode).toBeTruthy();
+    const probe = await db
+      .prepare("UPDATE work_orders SET diagnosis=diagnosis WHERE number=?")
+      .bind(number)
+      .run();
+    expect(probe.meta.changes).toBeGreaterThan(1);
+    await expect(
+      completeWorkOrder(context(), number, {
+        diagnosis: "Desgaste confirmado en rodillo aplicador",
+        solution: "Sustitución y verificación de vibración correcta",
+        failureModeId: "missing-mode",
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_FAILURE_MODE" });
+    await completeWorkOrder(context(), number, {
+      diagnosis: "Desgaste confirmado en rodillo aplicador",
+      solution: "Sustitución y verificación de vibración correcta",
+      failureModeId: mode!.id,
+    });
+    expect(
+      await db
+        .prepare(
+          "SELECT failure_mode_id AS id,failure_mode AS code FROM work_orders WHERE number=?",
+        )
+        .bind(number)
+        .first(),
+    ).toEqual({ id: mode!.id, code: mode!.code });
+    const recorded = await db
+      .prepare("SELECT asset_id AS assetId FROM work_orders WHERE number=?")
+      .bind(number)
+      .first<{ assetId: string }>();
+    const actor = await getAssetReliability(
+      tenantScope(manager),
+      recorded!.assetId,
+    );
+    expect(
+      actor?.signals.some((signal) => signal.failureModeId === mode!.id),
+    ).toBe(true);
+  });
+
+  it("incident conversion remains atomic with health projection triggers and concurrent retries", async () => {
+    const incident = await reportIncident(context(), {
+      functionalLocationId: "loc-lev-lm-02",
+      assetId: "asset-lm-02-app",
+      title: "Vibración anómala en aplicador",
+      description: "Oscilación en rodillo aplicador durante turno",
+      severity: "HIGH",
+      initialImpact: "REDUCED_SPEED",
+      origin: "MAINTENANCE",
+    });
+    await triageIncident(context(), incident.id, { action: "START_TRIAGE" });
+    await triageIncident(context(), incident.id, {
+      action: "ACCEPT",
+      priority: "P3_HIGH",
+      classification: "CORRECTIVE",
+      assetId: "asset-lm-02-app",
+    });
+    const results = await Promise.allSettled(
+      [0, 1].map(() => convertIncidentToWorkOrder(context(), incident.id)),
+    );
+    expect(
+      results.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      (
+        await db
+          .prepare("SELECT COUNT(*) AS n FROM work_orders WHERE incident_id=?")
+          .bind(incident.id)
+          .first<{ n: number }>()
+      )?.n,
+    ).toBe(1);
+    expect(
+      (
+        await db
+          .prepare("SELECT status FROM incidents WHERE id=?")
+          .bind(incident.id)
+          .first<{ status: string }>()
+      )?.status,
+    ).toBe("CONVERTED");
+    expect(
+      (
+        await db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM audit_entries WHERE entity_id=? AND action='INCIDENT_CONVERTED'",
+          )
+          .bind(incident.id)
+          .first<{ n: number }>()
+      )?.n,
+    ).toBe(1);
+    expect(
+      (await db.prepare("PRAGMA foreign_key_check").all()).results,
+    ).toEqual([]);
+  });
+
+  it("physical count writes one ledger movement, respects reservations and rejects stale concurrent counts", async () => {
+    const stock = await db
+      .prepare(
+        "SELECT id,on_hand AS physical,reserved,version FROM stock_levels WHERE site_id=? AND on_hand>reserved AND on_hand>=2 LIMIT 1",
+      )
+      .bind(manager.siteId)
+      .first<{
+        id: string;
+        physical: number;
+        reserved: number;
+        version: number;
+      }>();
+    expect(stock).toBeTruthy();
+    await expect(
+      recordPhysicalCount(
+        context({ ...manager, fullWarehouseAccess: false, warehouseIds: [] }),
+        {
+          stockId: stock!.id,
+          countedQuantity: stock!.physical + 1,
+          expectedVersion: stock!.version,
+          reason: "Conteo fuera de almacén",
+        },
+      ),
+    ).rejects.toMatchObject({ code: "WAREHOUSE_SCOPE_DENIED" });
+    if (stock!.reserved > 0)
+      await expect(
+        recordPhysicalCount(context(), {
+          stockId: stock!.id,
+          countedQuantity: stock!.reserved - 1,
+          expectedVersion: stock!.version,
+          reason: "Conteo inferior a reserva",
+        }),
+      ).rejects.toMatchObject({ code: "COUNT_BELOW_RESERVED" });
+    const baseline = (await db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM inventory_movements WHERE bin_id=(SELECT bin_id FROM stock_levels WHERE id=?) AND part_id=(SELECT part_id FROM stock_levels WHERE id=?) AND movement_type='ADJUSTMENT'",
+      )
+      .bind(stock!.id, stock!.id)
+      .first<{ n: number }>())!.n;
+    const count = await recordPhysicalCount(context(), {
+      stockId: stock!.id,
+      countedQuantity: stock!.physical + 2,
+      expectedVersion: stock!.version,
+      reason: "Conteo cíclico auditado",
+    });
+    expect(count.delta).toBe(2);
+    expect(count.available).toBe(count.physical - count.reserved);
+    expect(
+      (
+        await db
+          .prepare(
+            "SELECT delta_on_hand AS delta,unit_cost AS cost FROM inventory_movements WHERE id=?",
+          )
+          .bind(count.movementId)
+          .first<{ delta: number; cost: number }>()
+      )?.delta,
+    ).toBe(2);
+    await expect(
+      recordPhysicalCount(context(), {
+        stockId: stock!.id,
+        countedQuantity: stock!.physical + 3,
+        expectedVersion: stock!.version,
+        reason: "Reintento obsoleto de conteo",
+      }),
+    ).rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" });
+    const nextVersion = stock!.version + 1;
+    const racing = await Promise.allSettled(
+      [1, 2].map((delta) =>
+        recordPhysicalCount(context(), {
+          stockId: stock!.id,
+          countedQuantity: stock!.physical + 2 + delta,
+          expectedVersion: nextVersion,
+          reason: "Conteo concurrente auditado",
+        }),
+      ),
+    );
+    expect(
+      racing.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      (
+        await db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM inventory_movements WHERE bin_id=(SELECT bin_id FROM stock_levels WHERE id=?) AND part_id=(SELECT part_id FROM stock_levels WHERE id=?) AND movement_type='ADJUSTMENT'",
+          )
+          .bind(stock!.id, stock!.id)
+          .first<{ n: number }>()
+      )?.n,
+    ).toBe(baseline + 2);
+    const final = await db
+      .prepare(
+        "SELECT on_hand AS physical,reserved FROM stock_levels WHERE id=?",
+      )
+      .bind(stock!.id)
+      .first<{ physical: number; reserved: number }>();
+    expect(final!.physical).toBeGreaterThanOrEqual(final!.reserved);
   });
 
   it("preventive window and generated WO roll back on task insertion failure", async () => {
@@ -796,6 +1092,91 @@ describe("independent audit — persisted boundaries", () => {
     expect(report.costsByArea.some((row) => row.code.includes("LAM"))).toBe(
       false,
     );
+  });
+
+  it("reporting export uses keyset pages and includes the full scoped asset set, not the top widget", async () => {
+    const filters = { from: "2026-08-01", to: "2026-10-31" };
+    const rows = await listExportAssetCosts(manager, filters, "", 200);
+    const expected = await db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM assets WHERE organization_id=? AND site_id=?",
+      )
+      .bind(manager.organizationId, manager.siteId)
+      .first<{ n: number }>();
+    expect(rows.length).toBe(expected?.n);
+    expect(rows.length).toBeGreaterThan(12);
+    const first = await listExportAssetCosts(manager, filters, "", 7);
+    const next = await listExportAssetCosts(
+      manager,
+      filters,
+      first.at(-1)!.id,
+      7,
+    );
+    expect(first).toHaveLength(7);
+    expect(next).toHaveLength(7);
+    expect(new Set([...first, ...next].map((row) => row.id)).size).toBe(14);
+    const restrictedRows = await listExportAssetCosts(
+      { ...manager, fullAreaAccess: false, areaIds: ["loc-lev-print"] },
+      filters,
+      "",
+      200,
+    );
+    expect(restrictedRows.length).toBeLessThan(rows.length);
+  });
+
+  it("external costs and future labor rates are auditable without repricing historical sessions", async () => {
+    const number = await fixtureOrder("OT-LEV-2026-COST", "IN_PROGRESS");
+    const beforeLabor = await db
+      .prepare(
+        "SELECT id,labor_cost_cents AS cents FROM labor_sessions WHERE labor_cost_cents IS NOT NULL LIMIT 1",
+      )
+      .first<{ id: string; cents: number }>();
+    expect(beforeLabor).toBeTruthy();
+    const cost = await recordWorkOrderCost(context(), number, {
+      kind: "EXTERNAL_VENDOR",
+      description: "Diagnóstico externo de rodillo",
+      amountCents: 125_50,
+      vendorId: null,
+    });
+    expect(
+      await db
+        .prepare(
+          "SELECT amount_cents AS cents,currency FROM work_order_cost_items WHERE id=?",
+        )
+        .bind(cost.id)
+        .first(),
+    ).toEqual({ cents: 12550, currency: "EUR" });
+    const rate = await addLaborRate(context(), {
+      userId: "user-tech-1",
+      hourlyRateCents: 4875,
+      effectiveFrom: "2026-10-04T00:00:00.000Z",
+    });
+    expect(rate.id).toBeTruthy();
+    expect(
+      (
+        await db
+          .prepare(
+            "SELECT labor_cost_cents AS cents FROM labor_sessions WHERE id=?",
+          )
+          .bind(beforeLabor!.id)
+          .first<{ cents: number }>()
+      )?.cents,
+    ).toBe(beforeLabor!.cents);
+    const detail = await getWorkOrderDetail(tenantScope(manager), number);
+    expect(detail?.costs.explicit).toBe(125.5);
+    expect(detail?.costItems.some((item) => item.id === cost.id)).toBe(true);
+    await expect(
+      recordWorkOrderCost(
+        context({ ...manager, permissionCodes: [] }),
+        number,
+        {
+          kind: "OTHER",
+          description: "Coste sin permiso",
+          amountCents: 100,
+          vendorId: null,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "FORBIDDEN_OPERATION" });
   });
 
   it("CSV names cannot execute spreadsheet formulas", () => {

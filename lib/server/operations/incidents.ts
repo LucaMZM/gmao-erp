@@ -563,11 +563,11 @@ export async function convertIncidentToWorkOrder(
           ),
       ),
     ],
-    [0],
+    [0, 1],
   );
   assertMutationApplied(results[0]);
   const insertedOrder = results[1];
-  if (Number(insertedOrder?.meta?.changes ?? 0) !== 1) {
+  if (Number(insertedOrder?.meta?.changes ?? 0) < 1) {
     throw new ApiContractError(
       409,
       "INCIDENT_CONVERSION_FAILED",

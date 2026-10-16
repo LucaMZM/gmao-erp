@@ -12,9 +12,9 @@ const accounts = [
   { label: "Viewer", email: "viewer@mazmi.demo" },
 ];
 
-export function LoginForm() {
-  const [email, setEmail] = useState(accounts[0].email);
-  const [password, setPassword] = useState("Mazmi2026!");
+export function LoginForm({ demoMode }: { demoMode: boolean }) {
+  const [email, setEmail] = useState(demoMode ? accounts[0].email : "");
+  const [password, setPassword] = useState(demoMode ? "Mazmi2026!" : "");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,22 +47,26 @@ export function LoginForm() {
 
   return (
     <form className="login-form" onSubmit={submit}>
-      <label className="field-label" htmlFor="demo-account">
-        Perfil demo
-      </label>
-      <div className="select-wrap">
-        <select
-          id="demo-account"
-          onChange={(event) => setEmail(event.target.value)}
-          value={email}
-        >
-          {accounts.map((account) => (
-            <option key={account.email} value={account.email}>
-              {account.label}
-            </option>
-          ))}
-        </select>
-      </div>
+      {demoMode ? (
+        <>
+          <label className="field-label" htmlFor="demo-account">
+            Perfil demo
+          </label>
+          <div className="select-wrap">
+            <select
+              id="demo-account"
+              onChange={(event) => setEmail(event.target.value)}
+              value={email}
+            >
+              {accounts.map((account) => (
+                <option key={account.email} value={account.email}>
+                  {account.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </>
+      ) : null}
 
       <label className="field-label" htmlFor="email">
         Email
@@ -83,7 +87,7 @@ export function LoginForm() {
         <label className="field-label" htmlFor="password">
           Contraseña
         </label>
-        <span>Demo segura</span>
+        {demoMode ? <span>Demo segura</span> : null}
       </div>
       <div className="input-shell">
         <LockKeyhole size={16} />
@@ -119,10 +123,12 @@ export function LoginForm() {
         {loading ? <i className="button-spinner" /> : <ArrowRight size={17} />}
       </button>
 
-      <p className="demo-hint">
-        <span>Credencial compartida</span>
-        <code>Mazmi2026!</code>
-      </p>
+      {demoMode ? (
+        <p className="demo-hint">
+          <span>Credencial compartida</span>
+          <code>Mazmi2026!</code>
+        </p>
+      ) : null}
     </form>
   );
 }

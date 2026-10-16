@@ -6,6 +6,7 @@ import {
   UsersRound,
 } from "lucide-react";
 import { redirect } from "next/navigation";
+import Link from "next/link";
 import { PageHeader } from "@/components/ui/page-header";
 import { hasPermission, integrityStatus } from "@/lib/domain/governance";
 import { formatDuration } from "@/lib/presentation";
@@ -28,6 +29,18 @@ export default async function GovernancePage() {
         description="Calendario productivo, turnos, acceso e integridad sin reparación silenciosa."
         eyebrow={`${session.siteCode} · Enterprise control`}
         title="Gobierno operativo"
+        actions={
+          session.permissionCodes.includes("identity.manage") ? (
+            <div className="header-actions">
+              <Link className="secondary-button" href="/governance/users">
+                Administrar usuarios
+              </Link>
+              <Link className="secondary-button" href="/governance/rates">
+                Tarifas laborales
+              </Link>
+            </div>
+          ) : undefined
+        }
       />
       <section className={`governance-health ${status.state.toLowerCase()}`}>
         <span>

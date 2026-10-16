@@ -27,6 +27,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+*.log
 
 # local environment
 .env*
@@ -39,6 +40,27 @@ yarn-error.log*
 .vercel
 next-env.d.ts
 /dist/
+/build/
 /.wrangler/
 /outputs/
 /work/
+
+# local state, exports and private material
+/backups/
+/tmp/
+/temp/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.dump
+*.backup
+*.bak
+*.zip
+*.key
+*.p12
+*.pfx
+*.crt
+credentials*.json
+secrets*.json

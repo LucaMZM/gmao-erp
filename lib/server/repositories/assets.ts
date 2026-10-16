@@ -7,6 +7,7 @@ import {
   queryFirst,
 } from "./shared";
 import { getAssetReliability, type AssetReliabilityData } from "./reliability";
+import { syncHealthProjection } from "../health-projection";
 
 const OPEN_STATES =
   "('REQUESTED','TRIAGE','APPROVED','PLANNED','SCHEDULED','ASSIGNED','IN_PROGRESS','PAUSED','WAITING_PART','WAITING_VENDOR')";
@@ -165,6 +166,7 @@ export async function listAssets(
   scope: TenantScope,
   filters: AssetFilters,
 ): Promise<AssetListData> {
+  await syncHealthProjection(scope);
   const page = normalizePage(filters.page);
   const normalized: NormalizedAssetFilters = {
     query: normalizeQuery(filters.q),
@@ -431,6 +433,7 @@ export async function getAssetDetail(
   scope: TenantScope,
   code: string,
 ): Promise<AssetDetailData | null> {
+  await syncHealthProjection(scope);
   const locationScope = locationScopePredicate(
     scope,
     "asset.functional_location_id",

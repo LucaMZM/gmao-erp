@@ -255,6 +255,7 @@ export type WorkOrderDetail = {
   id: string;
   assetId: string;
   failureModeId: string | null;
+  failureModeName: string | null;
   number: string;
   title: string;
   description: string;
@@ -397,6 +398,15 @@ export type WorkOrderDetailData = {
     explicit: number;
     total: number;
   };
+  costItems: Array<{
+    id: string;
+    kind: string;
+    description: string;
+    amountCents: number;
+    recordedAt: string;
+    vendorName: string | null;
+  }>;
+  costVendors: Array<{ id: string; name: string }>;
   tasks: Array<{
     id: string;
     sequence: number;
@@ -450,6 +460,7 @@ export async function getWorkOrderDetail(
       wo.id,
       wo.asset_id AS assetId,
       wo.failure_mode_id AS failureModeId,
+      mode.name AS failureModeName,
       wo.number,
       wo.title,
       wo.description,
@@ -506,6 +517,7 @@ export async function getWorkOrderDetail(
     INNER JOIN users requester ON requester.id = wo.requested_by_id
     LEFT JOIN incidents incident ON incident.id = wo.incident_id
     LEFT JOIN maintenance_plans plan ON plan.id = wo.maintenance_plan_id
+    LEFT JOIN failure_modes mode ON mode.id = wo.failure_mode_id
     WHERE wo.organization_id = ? AND wo.site_id = ? AND wo.number = ?
       AND ${locationScope.sql}
     LIMIT 1
@@ -528,6 +540,8 @@ export async function getWorkOrderDetail(
     certificationRequirements,
     procurementLinks,
     explicitCosts,
+    costItems,
+    costVendors,
   ] = await Promise.all([
     queryAll<WorkOrderEvent>(
       `
@@ -688,6 +702,17 @@ export async function getWorkOrderDetail(
       "SELECT COALESCE(SUM(amount_cents),0) AS cents FROM work_order_cost_items WHERE work_order_id = ? AND site_id = ?",
       [order.id, scope.siteId],
     ),
+    queryAll<WorkOrderDetailData["costItems"][number]>(
+      `SELECT cost.id,cost.kind,cost.description,cost.amount_cents AS amountCents,
+         cost.recorded_at AS recordedAt,vendor.name AS vendorName
+       FROM work_order_cost_items cost LEFT JOIN vendors vendor ON vendor.id=cost.vendor_id
+       WHERE cost.work_order_id=? AND cost.site_id=? ORDER BY cost.recorded_at DESC`,
+      [order.id, scope.siteId],
+    ),
+    queryAll<WorkOrderDetailData["costVendors"][number]>(
+      "SELECT id,name FROM vendors WHERE organization_id=? AND status='ACTIVE' ORDER BY name LIMIT 200",
+      [scope.organizationId],
+    ),
   ]);
 
   const laborCost = labor.reduce(
@@ -722,5 +747,7 @@ export async function getWorkOrderDetail(
       explicit: explicitCost,
       total: laborCost + materialCost + explicitCost,
     },
+    costItems,
+    costVendors,
   };
 }

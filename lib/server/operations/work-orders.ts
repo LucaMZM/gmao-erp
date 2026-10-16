@@ -756,6 +756,7 @@ export async function completeWorkOrder(
     diagnosis: string;
     solution: string;
     failureMode?: string | null;
+    failureModeId?: string | null;
     failureCause?: string | null;
   },
 ): Promise<void> {
@@ -787,6 +788,20 @@ export async function completeWorkOrder(
     openDowntimeEvents: Number(downtime?.count ?? 0),
     requiredChecklistPending: Number(checklist?.count ?? 0),
   });
+  const formalMode = input.failureModeId
+    ? await getD1()
+        .prepare(
+          "SELECT id,code FROM failure_modes WHERE id=? AND organization_id=? AND status='ACTIVE' LIMIT 1",
+        )
+        .bind(input.failureModeId, context.session.organizationId)
+        .first<{ id: string; code: string }>()
+    : null;
+  if (input.failureModeId && !formalMode)
+    throw new ApiContractError(
+      422,
+      "INVALID_FAILURE_MODE",
+      "Selecciona un modo de fallo activo de la organización.",
+    );
   const now = operationNow(context);
   const nextVersion = order.version + 1;
   const db = getD1();
@@ -796,14 +811,15 @@ export async function completeWorkOrder(
       db
         .prepare(
           `UPDATE work_orders SET status = 'COMPLETED', diagnosis = ?, solution = ?,
-          failure_mode = ?, failure_cause = ?, actual_end = ?, completed_at = ?,
+          failure_mode = ?, failure_mode_id = ?, failure_cause = ?, actual_end = ?, completed_at = ?,
           version = version + 1, updated_at = ?
          WHERE id = ? AND organization_id = ? AND site_id = ? AND status = ? AND version = ?`,
         )
         .bind(
           input.diagnosis,
           input.solution,
-          input.failureMode ?? null,
+          formalMode?.code ?? input.failureMode ?? null,
+          formalMode?.id ?? null,
           input.failureCause ?? null,
           now,
           now,
@@ -831,6 +847,7 @@ export async function completeWorkOrder(
           status: "COMPLETED",
           diagnosis: input.diagnosis,
           solution: input.solution,
+          failureModeId: formalMode?.id ?? null,
         },
         expectedVersion: nextVersion,
         now,
@@ -878,13 +895,11 @@ export async function closeWorkOrder(
         .prepare(
           `UPDATE assets SET
           status = CASE WHEN status IN ('DOWN','DEGRADED','MAINTENANCE') THEN 'OPERATING' ELSE status END,
-          health_score = MIN(100, health_score + CASE WHEN ? = 'CORRECTIVE' THEN 5 ELSE 2 END),
           updated_at = ?
          WHERE id = ? AND site_id = ? AND status != 'RETIRED'
            AND EXISTS (SELECT 1 FROM work_orders WHERE id = ? AND version = ?)`,
         )
         .bind(
-          order.type,
           now,
           order.assetId,
           context.session.siteId,

@@ -26,6 +26,7 @@ import { notFound } from "next/navigation";
 import { DowntimeWorkspace } from "@/components/work-orders/downtime-workspace";
 import { MaterialWorkspace } from "@/components/work-orders/material-workspace";
 import { WorkOrderActions } from "@/components/work-orders/work-order-actions";
+import { WorkOrderCostForm } from "@/components/work-orders/work-order-cost-form";
 import { EmptyState } from "@/components/ui/empty-state";
 import { StatusBadge } from "@/components/ui/status-badge";
 import {
@@ -43,6 +44,7 @@ import { getCurrentSession, requireDemoSession } from "@/lib/server/auth";
 import { getFieldWorkOrder } from "@/lib/server/repositories/field";
 import { getWorkOrderDetail } from "@/lib/server/repositories/work-orders";
 import { tenantScope } from "@/lib/server/repositories/shared";
+import { getFailureModeOptions } from "@/lib/server/repositories/failure-modes";
 
 type Params = Promise<{ number: string }>;
 
@@ -85,6 +87,7 @@ export default async function WorkOrderDetailPage({
   );
   if (!data) notFound();
   const { order } = data;
+  const failureModes = await getFailureModeOptions(tenantScope(session));
   const materialOperationsAllowed = !["CLOSED", "CANCELLED"].includes(
     order.status,
   );
@@ -176,6 +179,8 @@ export default async function WorkOrderDetailPage({
       </div>
 
       <WorkOrderActions
+        failureModes={failureModes}
+        workOrderType={order.type}
         activeLabor={data.labor
           .filter((entry) => !entry.endedAt)
           .map((entry) => ({ id: entry.id, userName: entry.userName }))}
@@ -269,10 +274,11 @@ export default async function WorkOrderDetailPage({
               <div>
                 <span>Modo de fallo</span>
                 <strong>
-                  {order.failureMode
-                    ? (failureModeLabels[order.failureMode] ??
-                      order.failureMode)
-                    : "Sin clasificar"}
+                  {order.failureModeName ??
+                    (order.failureMode
+                      ? (failureModeLabels[order.failureMode] ??
+                        order.failureMode)
+                      : "Sin clasificar")}
                 </strong>
               </div>
               <div>
@@ -535,6 +541,29 @@ export default async function WorkOrderDetailPage({
                 </dd>
               </div>
             </dl>
+            {data.costItems.length ? (
+              <div className="work-cost-history">
+                {data.costItems.map((item) => (
+                  <div key={item.id}>
+                    <span>
+                      <strong>{item.description}</strong>
+                      <small>
+                        {item.vendorName ?? item.kind} ·{" "}
+                        {formatDateTime(item.recordedAt)}
+                      </small>
+                    </span>
+                    <b>{formatCurrency(item.amountCents / 100)}</b>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {session.permissionCodes.includes("workorder.close") &&
+            !["CLOSED", "CANCELLED"].includes(order.status) ? (
+              <WorkOrderCostForm
+                number={order.number}
+                vendors={data.costVendors}
+              />
+            ) : null}
           </section>
           {order.safetyLevel !== "STANDARD" ? (
             <section className="data-panel desktop-safety-card">

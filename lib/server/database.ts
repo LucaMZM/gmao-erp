@@ -9,6 +9,9 @@ import fieldOperationsMigration from "@/drizzle/0007_luxuriant_ender_wiggin.sql?
 import enterpriseGovernanceMigration from "@/drizzle/0008_enterprise_governance.sql?raw";
 import enterpriseAuditGuardrailsMigration from "@/drizzle/0009_enterprise_audit_guardrails.sql?raw";
 import atomicMutationAssertionsMigration from "@/drizzle/0010_atomic_mutation_assertions.sql?raw";
+import pilotImportJobsMigration from "@/drizzle/0011_pilot_import_jobs.sql?raw";
+import healthProjectionMigration from "@/drizzle/0012_health_projection.sql?raw";
+import preventiveSchedulerMigration from "@/drizzle/0013_preventive_scheduler.sql?raw";
 import { getD1 } from "@/db";
 import { seedDemoDatabase } from "@/db/seed";
 import { seedV1BDatabase } from "@/db/seed-v1b";
@@ -16,6 +19,8 @@ import { seedV1CDatabase } from "@/db/seed-v1c";
 import { seedV1DDatabase } from "@/db/seed-v1d";
 import { seedV2ADatabase } from "@/db/seed-v2a";
 import { seedV2BDatabase } from "@/db/seed-v2b";
+import { seedCoreAuthorization } from "@/db/seed-v2b";
+import { applicationMode } from "@/lib/server/runtime-mode";
 
 const MIGRATIONS = [
   { id: "0000_ancient_greymalkin", sql: foundationMigration },
@@ -35,6 +40,9 @@ const MIGRATIONS = [
     id: "0010_atomic_mutation_assertions",
     sql: atomicMutationAssertionsMigration,
   },
+  { id: "0011_pilot_import_jobs", sql: pilotImportJobsMigration },
+  { id: "0012_health_projection", sql: healthProjectionMigration },
+  { id: "0013_preventive_scheduler", sql: preventiveSchedulerMigration },
 ] as const;
 const SCHEMA_VERSION = MIGRATIONS.at(-1)!.id;
 let initialization: Promise<void> | null = null;
@@ -92,12 +100,15 @@ async function initialize(): Promise<void> {
     ]);
   }
 
-  await seedDemoDatabase(db);
-  await seedV1BDatabase(db);
-  await seedV1CDatabase(db);
-  await seedV1DDatabase(db);
-  await seedV2ADatabase(db);
-  await seedV2BDatabase(db);
+  if (applicationMode() === "DEMO") {
+    await seedDemoDatabase(db);
+    await seedV1BDatabase(db);
+    await seedV1CDatabase(db);
+    await seedV1DDatabase(db);
+    await seedV2ADatabase(db);
+    await seedV2BDatabase(db);
+  }
+  await seedCoreAuthorization(db);
 }
 
 async function adoptHostedSchema(db: ReturnType<typeof getD1>): Promise<void> {
@@ -183,10 +194,115 @@ async function adoptHostedSchema(db: ReturnType<typeof getD1>): Promise<void> {
     );
   }
 
+  const importObjects = await db
+    .prepare(
+      "SELECT name,sql FROM sqlite_master WHERE name IN ('import_jobs','uq_import_jobs_source','idx_import_jobs_site_created')",
+    )
+    .all<{ name: string; sql: string }>();
+  if (importObjects.results.length > 0 && importObjects.results.length !== 3)
+    throw new Error("MIGRATION_0011_PARTIAL_HOSTED_SCHEMA");
+  const hasImportJobs = importObjects.results.length === 3;
+  if (hasImportJobs) {
+    const expected = pilotImportJobsMigration
+      .split("--> statement-breakpoint")
+      .map(normalizeGuard);
+    for (const object of importObjects.results) {
+      if (!expected.includes(normalizeGuard(object.sql)))
+        throw new Error(`MIGRATION_0011_SCHEMA_MISMATCH: ${object.name}`);
+    }
+  } else if (
+    await db
+      .prepare(
+        "SELECT id FROM _mazmi_migrations WHERE id='0011_pilot_import_jobs'",
+      )
+      .first()
+  ) {
+    throw new Error(
+      "MIGRATION_0011_SCHEMA_MISMATCH: ledger claims missing import jobs",
+    );
+  }
+
+  const healthObjects = await db
+    .prepare(
+      `SELECT name,sql FROM sqlite_master WHERE name IN (
+        'health_dirty_assets','idx_health_dirty_site',
+        'trg_health_asset_insert','trg_health_asset_update',
+        'trg_health_work_insert','trg_health_work_update',
+        'trg_health_incident_insert','trg_health_incident_update',
+        'trg_health_downtime_insert','trg_health_downtime_update')`,
+    )
+    .all<{ name: string; sql: string }>();
+  if (healthObjects.results.length > 0 && healthObjects.results.length !== 10)
+    throw new Error("MIGRATION_0012_PARTIAL_HOSTED_SCHEMA");
+  const hasHealthProjection = healthObjects.results.length === 10;
+  const computedColumn = await db
+    .prepare(
+      "SELECT COUNT(*) AS count FROM pragma_table_info('assets') WHERE name='health_computed_at'",
+    )
+    .first<{ count: number }>();
+  if (hasHealthProjection !== (Number(computedColumn?.count ?? 0) === 1))
+    throw new Error("MIGRATION_0012_PARTIAL_HOSTED_SCHEMA");
+  if (hasHealthProjection) {
+    const expected = healthProjectionMigration
+      .split("--> statement-breakpoint")
+      .map(normalizeGuard)
+      .filter((statement) => statement.startsWith("CREATE"));
+    for (const object of healthObjects.results) {
+      if (!expected.includes(normalizeGuard(object.sql)))
+        throw new Error(`MIGRATION_0012_SCHEMA_MISMATCH: ${object.name}`);
+    }
+  } else if (
+    await db
+      .prepare(
+        "SELECT id FROM _mazmi_migrations WHERE id='0012_health_projection'",
+      )
+      .first()
+  ) {
+    throw new Error(
+      "MIGRATION_0012_SCHEMA_MISMATCH: ledger claims missing projection",
+    );
+  }
+
+  const schedulerObjects = await db
+    .prepare(
+      "SELECT name,sql FROM sqlite_master WHERE name IN ('scheduler_runs','idx_scheduler_runs_job_started')",
+    )
+    .all<{ name: string; sql: string }>();
+  if (
+    schedulerObjects.results.length > 0 &&
+    schedulerObjects.results.length !== 2
+  )
+    throw new Error("MIGRATION_0013_PARTIAL_HOSTED_SCHEMA");
+  const hasScheduler = schedulerObjects.results.length === 2;
+  if (hasScheduler) {
+    const expected = preventiveSchedulerMigration
+      .split("--> statement-breakpoint")
+      .map(normalizeGuard);
+    for (const object of schedulerObjects.results) {
+      if (!expected.includes(normalizeGuard(object.sql)))
+        throw new Error(`MIGRATION_0013_SCHEMA_MISMATCH: ${object.name}`);
+    }
+  } else if (
+    await db
+      .prepare(
+        "SELECT id FROM _mazmi_migrations WHERE id='0013_preventive_scheduler'",
+      )
+      .first()
+  ) {
+    throw new Error(
+      "MIGRATION_0013_SCHEMA_MISMATCH: ledger claims missing scheduler",
+    );
+  }
+
   const appliedAt = new Date().toISOString();
   await db.batch(
     MIGRATIONS.filter(
-      (migration) => hasAtomicGuards || migration.id < "0010",
+      (migration) =>
+        migration.id < "0010" ||
+        (migration.id < "0011" && hasAtomicGuards) ||
+        (migration.id === "0011_pilot_import_jobs" && hasImportJobs) ||
+        (migration.id === "0012_health_projection" && hasHealthProjection) ||
+        (migration.id === "0013_preventive_scheduler" && hasScheduler),
     ).map((migration) =>
       db
         .prepare(

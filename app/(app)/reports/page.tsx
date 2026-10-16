@@ -78,7 +78,7 @@ export default async function ReportsPage({
           <small>Labor + MRO + explícitos</small>
         </article>
         <article>
-          <span>Disponibilidad productiva</span>
+          <span>Disponibilidad de calendario</span>
           <strong>
             {data.summary.availability === null
               ? "Datos insuficientes"
@@ -111,7 +111,7 @@ export default async function ReportsPage({
           <small>Correctivos completados</small>
         </article>
         <article>
-          <span>MTBF</span>
+          <span>MTBF · exposición programada</span>
           <strong>
             {data.summary.mtbfMinutes === null
               ? "Datos insuficientes"
@@ -125,6 +125,26 @@ export default async function ReportsPage({
           <small>Órdenes aún abiertas</small>
         </article>
       </section>
+      <details className="data-panel report-metric-glossary">
+        <summary>Cómo se calculan estos indicadores</summary>
+        <p>
+          <strong>Disponibilidad de calendario:</strong> (exposición productiva
+          programada − downtime registrado) / exposición programada. Agrupa las
+          unidades productivas visibles del centro.
+        </p>
+        <p>
+          <strong>Disponibilidad técnica en Reliability:</strong> (90 días
+          continuos − downtime correctivo) / 90 días por activo; no usa el
+          calendario productivo.
+        </p>
+        <p>
+          <strong>MTBF de Reporting:</strong> exposición programada del centro /
+          correctivos completados en el periodo.{" "}
+          <strong>MTBF técnico en Reliability:</strong> tiempo operativo de 90
+          días / fallos correctivos; se muestra como dato insuficiente con menos
+          de dos fallos.
+        </p>
+      </details>
       <CostByAssetSection data={data.costsByAsset} />
       <CostByAreaSection data={data.costsByArea} />
       <section className="data-panel report-secondary-grid">

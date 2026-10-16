@@ -46,6 +46,7 @@ const schema = z.discriminatedUnion("action", [
     diagnosis: z.string().trim().max(2_000),
     solution: z.string().trim().min(5).max(2_000),
     failureMode: z.string().trim().max(80).nullable().optional(),
+    failureModeId: z.string().trim().max(100).nullable().optional(),
     failureCause: z.string().trim().max(80).nullable().optional(),
   }),
   z.object({ action: z.literal("CLOSE") }),

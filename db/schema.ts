@@ -21,6 +21,56 @@ export const systemState = sqliteTable("system_state", {
   updatedAt: text("updated_at").notNull(),
 });
 
+export const importJobs = sqliteTable(
+  "import_jobs",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    siteId: text("site_id")
+      .notNull()
+      .references(() => sites.id, { onDelete: "restrict" }),
+    actorId: text("actor_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    kind: text("kind").notNull(),
+    sourceHash: text("source_hash").notNull(),
+    sourceName: text("source_name").notNull(),
+    status: text("status").notNull(),
+    summaryJson: text("summary_json"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("uq_import_jobs_source").on(
+      table.organizationId,
+      table.siteId,
+      table.kind,
+      table.sourceHash,
+    ),
+    index("idx_import_jobs_site_created").on(table.siteId, table.createdAt),
+  ],
+);
+
+export const schedulerRuns = sqliteTable(
+  "scheduler_runs",
+  {
+    id: text("id").primaryKey(),
+    jobKey: text("job_key").notNull(),
+    status: text("status").notNull(),
+    startedAt: text("started_at").notNull(),
+    finishedAt: text("finished_at"),
+    scanned: integer("scanned").notNull().default(0),
+    created: integer("created").notNull().default(0),
+    alreadyGenerated: integer("already_generated").notNull().default(0),
+    errorsJson: text("errors_json").notNull().default("[]"),
+  },
+  (table) => [
+    index("idx_scheduler_runs_job_started").on(table.jobKey, table.startedAt),
+  ],
+);
+
 export const organizations = sqliteTable(
   "organizations",
   {
@@ -519,6 +569,7 @@ export const assets = sqliteTable(
     status: text("status").notNull(),
     criticality: text("criticality").notNull(),
     healthScore: integer("health_score").notNull(),
+    healthComputedAt: text("health_computed_at"),
     manufacturer: text("manufacturer"),
     model: text("model"),
     serialNumber: text("serial_number"),

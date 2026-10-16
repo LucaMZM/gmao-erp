@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useState } from "react";
+import type { FailureModeOption } from "@/lib/server/repositories/failure-modes";
 
 type Technician = {
   id: string;
@@ -38,6 +39,8 @@ export function WorkOrderActions({
   assignedUserIds,
   activeLabor,
   permissions,
+  failureModes,
+  workOrderType,
 }: {
   number: string;
   status: string;
@@ -46,6 +49,8 @@ export function WorkOrderActions({
   assignedUserIds: string[];
   activeLabor: Array<{ id: string; userName: string }>;
   permissions: WorkOrderActionPermissions;
+  failureModes: FailureModeOption[];
+  workOrderType: string;
 }) {
   const router = useRouter();
   const [panel, setPanel] = useState<
@@ -120,7 +125,7 @@ export function WorkOrderActions({
       action: "COMPLETE",
       diagnosis: data.get("diagnosis"),
       solution: data.get("solution"),
-      failureMode: data.get("failureMode") || null,
+      failureModeId: data.get("failureModeId") || null,
       failureCause: data.get("failureCause") || null,
     });
   };
@@ -344,13 +349,17 @@ export function WorkOrderActions({
           </label>
           <label>
             <span>Modo de fallo</span>
-            <select defaultValue="" name="failureMode">
+            <select defaultValue="" name="failureModeId">
               <option value="">Sin clasificar</option>
-              <option value="VIBRATION">Vibración</option>
-              <option value="LEAKAGE">Fuga</option>
-              <option value="OVERHEATING">Sobretemperatura</option>
-              <option value="SIGNAL_LOSS">Pérdida de señal</option>
+              {failureModes.map((mode) => (
+                <option key={mode.id} value={mode.id}>
+                  {mode.name} · {mode.code}
+                </option>
+              ))}
             </select>
+            {workOrderType === "CORRECTIVE" ? (
+              <small>Clasifica el fallo para recurrencia y Pareto.</small>
+            ) : null}
           </label>
           <label>
             <span>Causa</span>

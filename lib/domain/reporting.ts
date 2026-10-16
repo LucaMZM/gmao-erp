@@ -8,9 +8,10 @@ export type CostByAssetExportRow = {
   downtimeMinutes: number;
 };
 
-export function reportingCsv(data: {
-  costsByAsset: readonly CostByAssetExportRow[];
-}): string {
+export function reportingCsvRows(
+  items: readonly CostByAssetExportRow[],
+  includeHeader = true,
+): string {
   const escape = (value: unknown) => {
     const text = String(value ?? "");
     // Quoting alone does not stop spreadsheet formula evaluation.
@@ -20,18 +21,20 @@ export function reportingCsv(data: {
         : text;
     return `"${safe.replaceAll('"', '""')}"`;
   };
-  const rows = [
-    [
-      "Activo",
-      "Nombre",
-      "Mano de obra EUR",
-      "MRO EUR",
-      "Otros EUR",
-      "Total EUR",
-      "Downtime min",
-    ],
-  ];
-  for (const item of data.costsByAsset) {
+  const rows = includeHeader
+    ? [
+        [
+          "Activo",
+          "Nombre",
+          "Mano de obra EUR",
+          "MRO EUR",
+          "Otros EUR",
+          "Total EUR",
+          "Downtime min",
+        ],
+      ]
+    : ([] as string[][]);
+  for (const item of items) {
     rows.push([
       item.code,
       item.name,
@@ -43,4 +46,10 @@ export function reportingCsv(data: {
     ]);
   }
   return rows.map((row) => row.map(escape).join(",")).join("\n");
+}
+
+export function reportingCsv(data: {
+  costsByAsset: readonly CostByAssetExportRow[];
+}): string {
+  return reportingCsvRows(data.costsByAsset);
 }

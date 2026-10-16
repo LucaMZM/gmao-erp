@@ -87,6 +87,15 @@ export default async function AssetDetailPage({ params }: { params: Params }) {
         <strong>{asset.code}</strong>
       </nav>
 
+      {session.permissionCodes.includes("asset.manage") ? (
+        <Link
+          className="secondary-button"
+          href={`/assets/manage?asset=${encodeURIComponent(asset.id)}`}
+        >
+          Editar activo
+        </Link>
+      ) : null}
+
       <header className="entity-detail-header">
         <div className="detail-identity">
           <span className="large-asset-token">{asset.code.split("-")[0]}</span>

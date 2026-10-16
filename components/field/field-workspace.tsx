@@ -33,15 +33,18 @@ import {
   statusLabels,
 } from "@/lib/presentation";
 import type { FieldWorkOrderData } from "@/lib/server/repositories/field";
+import type { FailureModeOption } from "@/lib/server/repositories/failure-modes";
 
 type OperationFeedback = { tone: "error" | "success"; text: string } | null;
 
 export function FieldWorkspace({
   data,
   userId,
+  failureModes,
 }: {
   data: FieldWorkOrderData;
   userId: string;
+  failureModes: FailureModeOption[];
 }) {
   const router = useRouter();
   const { order } = data;
@@ -224,7 +227,7 @@ export function FieldWorkspace({
       await workAction("COMPLETE", {
         diagnosis: form.get("diagnosis"),
         solution: form.get("solution"),
-        failureMode: form.get("failureMode") || null,
+        failureModeId: form.get("failureModeId") || null,
         failureCause: form.get("failureCause") || null,
       })
     )
@@ -615,12 +618,13 @@ export function FieldWorkspace({
           <div className="field-form-grid">
             <label>
               <span>Modo de fallo</span>
-              <select defaultValue="" name="failureMode">
+              <select defaultValue="" name="failureModeId">
                 <option value="">Sin clasificar</option>
-                <option value="VIBRATION">Vibración</option>
-                <option value="LEAKAGE">Fuga</option>
-                <option value="OVERHEATING">Sobretemperatura</option>
-                <option value="SIGNAL_LOSS">Pérdida de señal</option>
+                {failureModes.map((mode) => (
+                  <option key={mode.id} value={mode.id}>
+                    {mode.name} · {mode.code}
+                  </option>
+                ))}
               </select>
             </label>
             <label>

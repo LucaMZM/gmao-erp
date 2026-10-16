@@ -75,12 +75,19 @@ export default async function AssetsPage({
         eyebrow={`${session.siteCode} · Registro técnico`}
         title="Activos"
         actions={
-          <div className="entity-total">
-            <Boxes size={15} />
-            <span>
-              <strong>{data.total}</strong> activos visibles
-            </span>
-          </div>
+          <>
+            {session.permissionCodes.includes("asset.manage") ? (
+              <Link className="secondary-button" href="/assets/manage">
+                Administrar activos
+              </Link>
+            ) : null}
+            <div className="entity-total">
+              <Boxes size={15} />
+              <span>
+                <strong>{data.total}</strong> activos visibles
+              </span>
+            </div>
+          </>
         }
       />
       <section className="toolbar-panel">

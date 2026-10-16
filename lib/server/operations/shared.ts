@@ -94,7 +94,10 @@ export function assertMutationApplied(
   result: D1Result<unknown> | undefined,
   message = "El registro ha cambiado en otra sesión. Actualiza y reintenta.",
 ): void {
-  if (Number(result?.meta?.changes ?? 0) !== 1) {
+  // D1's meta.changes includes trigger writes (for example the health dirty
+  // queue). Exact single-row CAS is asserted by _mutation_assertions inside
+  // atomicBatch, using SQLite changes() for the preceding statement.
+  if (Number(result?.meta?.changes ?? 0) < 1) {
     throw new ApiContractError(409, "CONCURRENT_MODIFICATION", message);
   }
 }
@@ -271,28 +274,32 @@ export async function runIdempotent<T>(
     operation += `:${Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
   }
   const id = operationId("idempotency");
-  const now = operationNow(context);
-  const reservation = await db
-    .prepare(
-      `INSERT OR IGNORE INTO operation_idempotency
-       (id, organization_id, site_id, actor_id, idempotency_key, operation,
-        entity_type, entity_id, response_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)`,
-    )
-    .bind(
-      id,
-      context.session.organizationId,
-      context.session.siteId,
-      context.session.userId,
-      idempotencyKey,
-      operation,
-      now,
-    )
-    .run();
+  // Reservation age is a lease clock, independent of a backdated domain event.
+  // A former worker is fenced by the response UPDATE in the business batch.
+  const now = new Date().toISOString();
+  const reserve = () =>
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO operation_idempotency
+     (id, organization_id, site_id, actor_id, idempotency_key, operation,
+      entity_type, entity_id, response_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)`,
+      )
+      .bind(
+        id,
+        context.session.organizationId,
+        context.session.siteId,
+        context.session.userId,
+        idempotencyKey,
+        operation,
+        now,
+      )
+      .run();
+  let reservation = await reserve();
   if (Number(reservation.meta?.changes ?? 0) === 0) {
     const existing = await db
       .prepare(
-        `SELECT operation, response_json AS responseJson
+        `SELECT id, operation, response_json AS responseJson, created_at AS createdAt
          FROM operation_idempotency
          WHERE organization_id = ? AND site_id = ?
            AND actor_id = ? AND idempotency_key = ?`,
@@ -303,7 +310,12 @@ export async function runIdempotent<T>(
         context.session.userId,
         idempotencyKey,
       )
-      .first<{ operation: string; responseJson: string | null }>();
+      .first<{
+        id: string;
+        operation: string;
+        responseJson: string | null;
+        createdAt: string;
+      }>();
     if (!existing || existing.operation !== operation) {
       throw new ApiContractError(
         409,
@@ -311,14 +323,84 @@ export async function runIdempotent<T>(
         "La clave ya identifica otra operación.",
       );
     }
-    if (!existing.responseJson) {
+    if (existing.responseJson)
+      return { value: JSON.parse(existing.responseJson) as T, replayed: true };
+    const cutoff = new Date(Date.now() - 15 * 60_000).toISOString();
+    if (existing.createdAt <= cutoff) {
+      // CAS + audit commit together. If the old worker committed meanwhile,
+      // the NULL predicate fails; if this wins, its later business batch is
+      // rolled back by commitIdempotentOperation's exact-row assertion.
+      try {
+        await atomicBatch(
+          db,
+          [
+            db
+              .prepare(
+                `DELETE FROM operation_idempotency WHERE id=? AND operation=?
+             AND response_json IS NULL AND created_at<=?`,
+              )
+              .bind(existing.id, operation, cutoff),
+            db
+              .prepare(
+                `INSERT INTO audit_entries
+             (id,organization_id,site_id,actor_id,action,entity_type,entity_id,
+              previous_value,new_value,request_id,created_at)
+             VALUES (?,?,?,?, 'IDEMPOTENCY_RESERVATION_RECOVERED',
+              'OPERATION_IDEMPOTENCY',?,NULL,?,?,?)`,
+              )
+              .bind(
+                operationId("audit"),
+                context.session.organizationId,
+                context.session.siteId,
+                context.session.userId,
+                existing.id,
+                JSON.stringify({ operation, idempotencyKey }),
+                context.requestId,
+                now,
+              ),
+          ],
+          [0, 1],
+        );
+        reservation = await reserve();
+      } catch (error) {
+        if (!(
+          error instanceof ApiContractError &&
+          error.code === "CONCURRENT_MODIFICATION"
+        ))
+          throw error;
+      }
+      if (Number(reservation.meta?.changes ?? 0) === 0) {
+        const latest = await db
+          .prepare(
+            `SELECT operation,response_json AS responseJson FROM operation_idempotency
+           WHERE organization_id=? AND site_id=? AND actor_id=? AND idempotency_key=?`,
+          )
+          .bind(
+            context.session.organizationId,
+            context.session.siteId,
+            context.session.userId,
+            idempotencyKey,
+          )
+          .first<{ operation: string; responseJson: string | null }>();
+        if (latest?.operation !== operation)
+          throw new ApiContractError(
+            409,
+            "IDEMPOTENCY_KEY_REUSED",
+            "La clave ya identifica otra operación.",
+          );
+        if (latest.responseJson)
+          return {
+            value: JSON.parse(latest.responseJson) as T,
+            replayed: true,
+          };
+      }
+    }
+    if (Number(reservation.meta?.changes ?? 0) === 0)
       throw new ApiContractError(
         409,
         "OPERATION_SYNCING",
         "La operación ya se está sincronizando.",
       );
-    }
-    return { value: JSON.parse(existing.responseJson) as T, replayed: true };
   }
   try {
     context.idempotencyReservationId = id;

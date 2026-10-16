@@ -11,6 +11,9 @@ import { seedV2BDatabase } from "@/db/seed-v2b";
 
 const binding = vi.hoisted(() => ({ db: null as unknown as D1Database }));
 vi.mock("@/db", () => ({ getD1: () => binding.db }));
+// Migration torture exercises the established demo seed path. Production's
+// empty bootstrap is covered separately by production-bootstrap.test.ts.
+vi.mock("@/lib/server/runtime-mode", () => ({ applicationMode: () => "DEMO" }));
 const runtimes: Miniflare[] = [];
 const files = readdirSync("drizzle")
   .filter((file) => file.endsWith(".sql"))
@@ -180,7 +183,7 @@ describe("independent migration torture — actual bootstrap and D1", () => {
       }
       const { databaseHealth } = await initializeActual();
       const health = await databaseHealth();
-      expect(health.schemaVersion).toBe("0010_atomic_mutation_assertions");
+      expect(health.schemaVersion).toBe("0013_preventive_scheduler");
       for (const [name, value] of Object.entries(health))
         if (name.endsWith("Violations")) expect(value, name).toBe(0);
       const before = await db
@@ -210,6 +213,15 @@ describe("independent migration torture — actual bootstrap and D1", () => {
           await db
             .prepare(
               "SELECT name FROM sqlite_master WHERE name IN ('uq_labor_one_active_user','uq_downtime_one_active_order','_mutation_assertions')",
+            )
+            .all()
+        ).results,
+      ).toHaveLength(3);
+      expect(
+        (
+          await db
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE name IN ('import_jobs','uq_import_jobs_source','idx_import_jobs_site_created')",
             )
             .all()
         ).results,
@@ -265,4 +277,82 @@ describe("independent migration torture — actual bootstrap and D1", () => {
         .first(),
     ).not.toBeNull();
   }, 60_000);
+
+  it("adopts a hosting-applied 0011 only when its table and indexes really exist", async () => {
+    const db = await database();
+    await historicalSchema(db, 10);
+    const sql = readFileSync("drizzle/0011_pilot_import_jobs.sql", "utf8")
+      .split("--> statement-breakpoint")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    await db.batch(sql.map((s) => db.prepare(s)));
+    await initializeActual();
+    expect(
+      await db
+        .prepare(
+          "SELECT id FROM _mazmi_migrations WHERE id='0011_pilot_import_jobs'",
+        )
+        .first(),
+    ).not.toBeNull();
+    expect(
+      (await db.prepare("PRAGMA foreign_key_check").all()).results,
+    ).toEqual([]);
+  }, 60000);
+
+  it("adopts hosting-applied 0012 with its complete change queue and triggers", async () => {
+    const db = await database();
+    await historicalSchema(db, 11);
+    const statements = readFileSync(
+      "drizzle/0012_health_projection.sql",
+      "utf8",
+    )
+      .split("--> statement-breakpoint")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    await db.batch(statements.map((statement) => db.prepare(statement)));
+    await initializeActual();
+    expect(
+      await db
+        .prepare(
+          "SELECT id FROM _mazmi_migrations WHERE id='0012_health_projection'",
+        )
+        .first(),
+    ).not.toBeNull();
+    expect(
+      (
+        await db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'trg_health_%'",
+          )
+          .first<{ n: number }>()
+      )?.n,
+    ).toBe(8);
+    expect(
+      (await db.prepare("PRAGMA foreign_key_check").all()).results,
+    ).toEqual([]);
+  }, 60000);
+
+  it("adopts hosting-applied 0013 only with run journal and index", async () => {
+    const db = await database();
+    await historicalSchema(db, 12);
+    const statements = readFileSync(
+      "drizzle/0013_preventive_scheduler.sql",
+      "utf8",
+    )
+      .split("--> statement-breakpoint")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    await db.batch(statements.map((statement) => db.prepare(statement)));
+    await initializeActual();
+    expect(
+      await db
+        .prepare(
+          "SELECT id FROM _mazmi_migrations WHERE id='0013_preventive_scheduler'",
+        )
+        .first(),
+    ).not.toBeNull();
+    expect(
+      (await db.prepare("PRAGMA foreign_key_check").all()).results,
+    ).toEqual([]);
+  }, 60000);
 });

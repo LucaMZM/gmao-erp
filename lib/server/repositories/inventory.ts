@@ -67,6 +67,7 @@ export type InventoryCompatibleAsset = {
 
 export type InventoryLocationRow = {
   id: string;
+  version: number;
   warehouseName: string;
   zoneName: string | null;
   binCode: string;
@@ -457,7 +458,7 @@ export async function listInventory(
             [selectedPart.id, scope.siteId, ...compatibleAssetScope.params],
           ),
           queryAll<InventoryLocationRow>(
-            `SELECT stock.id, warehouse.name AS warehouseName,
+            `SELECT stock.id, stock.version, warehouse.name AS warehouseName,
             zone.name AS zoneName, bin.code AS binCode,
             stock.on_hand AS onHand, stock.reserved,
             stock.on_hand - stock.reserved AS available, stock.on_order AS onOrder

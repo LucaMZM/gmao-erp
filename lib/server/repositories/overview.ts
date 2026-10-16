@@ -3,6 +3,7 @@ import { dateKeyInTimeZone } from "@/lib/presentation";
 import { calendarAvailability } from "@/lib/domain/production-calendar";
 import { getProductionExposure } from "./governance";
 import type { TenantScope } from "./shared";
+import { syncHealthProjection } from "../health-projection";
 
 const OPEN_STATES =
   "('REQUESTED','TRIAGE','APPROVED','PLANNED','SCHEDULED','ASSIGNED','IN_PROGRESS','PAUSED','WAITING_PART','WAITING_VENDOR')";
@@ -112,6 +113,7 @@ export type OverviewData = {
 };
 
 export async function getOverview(scope: TenantScope): Promise<OverviewData> {
+  await syncHealthProjection(scope);
   const { queryAll, queryFirst } = scopedQueries(scope);
   const now = new Date().toISOString();
   const today = dateKeyInTimeZone(now);

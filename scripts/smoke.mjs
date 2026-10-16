@@ -108,7 +108,7 @@ const health = await fetch(`${baseUrl}/api/health`);
 assert(health.ok, `Health check failed with ${health.status}`);
 const healthData = await health.json();
 assert(
-  healthData.schemaVersion === "0010_atomic_mutation_assertions",
+  healthData.schemaVersion === "0013_preventive_scheduler",
   `Unexpected schema version ${healthData.schemaVersion}.`,
 );
 assert(healthData.assets === 72, "Expected 72 seeded assets.");

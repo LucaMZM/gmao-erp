@@ -28,6 +28,8 @@ const workerArguments = [
   "--persist-to",
   state,
   "--show-interactive-dev-session=false",
+  "--var",
+  "MAZMI_APP_MODE:DEMO",
 ];
 if (visualMode)
   workerArguments.push("--var", `MAZMI_TEST_NOW:${visualTestNow}`);
@@ -104,7 +106,7 @@ try {
       const response = await fetch(base + "/api/health");
       const health = await response.json();
       if (response.ok) {
-        assert.equal(health.schemaVersion, "0010_atomic_mutation_assertions");
+        assert.equal(health.schemaVersion, "0013_preventive_scheduler");
         ready = true;
         break;
       }
@@ -268,16 +270,32 @@ try {
         );
       });
     await check("same idempotency key cannot change payload", async () => {
+      let changed;
+      // Wrangler's local ProxyWorker can lose its dev-server connection while
+      // the Worker remains healthy. Retry only this exact transport response;
+      // the same idempotency key/payload must still be rejected by the API.
+      let proxyRetries = 0;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        changed = await post(
+          "/api/field/handovers",
+          tech,
+          { ...handover, summary: "Altered payload" },
+          headers,
+        );
+        if (
+          changed.status !== 500 ||
+          (await changed.clone().text()).trim() !==
+            "Error: Network connection lost."
+        )
+          break;
+        proxyRetries++;
+        await delay(200);
+      }
+      const body = await changed.text();
       assert.equal(
-        (
-          await post(
-            "/api/field/handovers",
-            tech,
-            { ...handover, summary: "Altered payload" },
-            headers,
-          )
-        ).status,
+        changed.status,
         409,
+        `${changed.status} ${body.slice(0, 300)} after ${proxyRetries} ProxyWorker retries`,
       );
     });
     const evidencePath = `/api/field/work-orders/${number}/evidence`;
@@ -946,4 +964,9 @@ try {
 } finally {
   db?.close();
   worker.kill("SIGTERM");
+  if (worker.exitCode === null && worker.signalCode === null)
+    await Promise.race([
+      new Promise((resolve) => worker.once("exit", resolve)),
+      delay(3000),
+    ]);
 }

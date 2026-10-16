@@ -29,6 +29,7 @@ import {
   listInventory,
 } from "@/lib/server/repositories/inventory";
 import { tenantScope } from "@/lib/server/repositories/shared";
+import { PhysicalCountForm } from "@/components/inventory/physical-count-form";
 
 function stockTone(item: {
   available: number;
@@ -87,10 +88,17 @@ export default async function InventoryPage({
         eyebrow={`${session.siteCode} · Almacén MRO`}
         title="Inventario y recambios"
         actions={
-          <div className="ledger-principle">
-            <LockKeyhole size={14} />
-            <span>El stock solo cambia mediante movimientos</span>
-          </div>
+          <>
+            {session.permissionCodes.includes("inventory.manage") ? (
+              <Link className="secondary-button" href="/inventory/manage">
+                Administrar catálogo
+              </Link>
+            ) : null}
+            <div className="ledger-principle">
+              <LockKeyhole size={14} />
+              <span>El stock solo cambia mediante movimientos</span>
+            </div>
+          </>
         }
       />
 
@@ -452,6 +460,15 @@ export default async function InventoryPage({
                           reservado · {location.onOrder} pedido
                         </small>
                       </span>
+                      {session.permissionCodes.includes("inventory.manage") ? (
+                        <PhysicalCountForm
+                          stockId={location.id}
+                          version={location.version}
+                          physical={location.onHand}
+                          reserved={location.reserved}
+                          unit={data.selected!.part.unit}
+                        />
+                      ) : null}
                     </div>
                   ))}
                 </div>
