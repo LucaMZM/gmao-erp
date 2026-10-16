@@ -4,6 +4,15 @@ const credentials = {
   password: process.env.MAZMI_DEMO_PASSWORD ?? "Mazmi2026!",
 };
 const origin = new URL(baseUrl).origin;
+const rawFetch = globalThis.fetch;
+
+// Wrangler's local ProxyWorker can drop pooled keep-alive connections between
+// requests. Use independent connections; never replay a state-changing call.
+async function fetch(input, init = {}) {
+  const requestHeaders = new Headers(init.headers);
+  requestHeaders.set("connection", "close");
+  return rawFetch(input, { ...init, headers: requestHeaders });
+}
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
