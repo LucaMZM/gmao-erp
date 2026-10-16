@@ -18,7 +18,7 @@
     "test": "vitest run",
     "test:e2e": "node scripts/smoke.mjs",
     "test:audit:http": "node scripts/independent-http.mjs",
-    "test:smoke:compiled": "node scripts/retry-compiled-smoke.mjs",
+    "test:smoke:compiled": "node scripts/compiled-smoke-direct.mjs",
     "test:visual:compiled": "node scripts/independent-http.mjs --visual-only",
     "test:visual": "playwright test",
     "test:visual:update": "playwright test --update-snapshots",
