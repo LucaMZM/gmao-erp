@@ -1,0 +1,3 @@
+# Reviewed false positive: QA narrative in docs/independent-audit.md at commit cbd426a, line 99.
+# The match is Spanish prose about negative auth/API tests; it is not a credential.
+cbd426a99b4e7f4b7eb90bb933f09215b85e32da:docs/independent-audit.md:generic-api-key:99
